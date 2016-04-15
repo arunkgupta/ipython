@@ -23,10 +23,43 @@ def generate_tokens(readline):
         # catch EOF error
         return
 
+def line_at_cursor(cell, cursor_pos=0):
+    """Return the line in a cell at a given cursor position
+    
+    Used for calling line-based APIs that don't support multi-line input, yet.
+    
+    Parameters
+    ----------
+    
+    cell: text
+        multiline block of text
+    cursor_pos: integer
+        the cursor position
+    
+    Returns
+    -------
+    
+    (line, offset): (text, integer)
+        The line with the current cursor, and the character offset of the start of the line.
+    """
+    offset = 0
+    lines = cell.splitlines(True)
+    for line in lines:
+        next_offset = offset + len(line)
+        if next_offset >= cursor_pos:
+            break
+        offset = next_offset
+    else:
+        line = ""
+    return (line, offset)
+
 def token_at_cursor(cell, cursor_pos=0):
     """Get the token at a given cursor
     
     Used for introspection.
+    
+    Function calls are prioritized, so the token for the callable will be returned
+    if the cursor is anywhere inside the call.
     
     Parameters
     ----------
@@ -39,15 +72,27 @@ def token_at_cursor(cell, cursor_pos=0):
     cell = cast_unicode_py2(cell)
     names = []
     tokens = []
-    offset = 0
+    call_names = []
+    
+    offsets = {1: 0} # lines start at 1
     for tup in generate_tokens(StringIO(cell).readline):
         
         tok = Token(*tup)
         
         # token, text, start, end, line = tup
-        start_col = tok.start[1]
-        end_col = tok.end[1]
-        if offset + start_col > cursor_pos:
+        start_line, start_col = tok.start
+        end_line, end_col = tok.end
+        if end_line + 1 not in offsets:
+            # keep track of offsets for each line
+            lines = tok.line.splitlines(True)
+            for lineno, line in zip(range(start_line + 1, end_line + 2), lines):
+                if lineno not in offsets:
+                    offsets[lineno] = offsets[lineno-1] + len(line)
+        
+        offset = offsets[start_line]
+        # allow '|foo' to find 'foo' at the beginning of a line
+        boundary = cursor_pos + 1 if start_col == 0 else cursor_pos
+        if offset + start_col >= boundary:
             # current token starts after the cursor,
             # don't consume it
             break
@@ -61,16 +106,21 @@ def token_at_cursor(cell, cursor_pos=0):
             if tok.text == '=' and names:
                 # don't inspect the lhs of an assignment
                 names.pop(-1)
+            if tok.text == '(' and names:
+                # if we are inside a function call, inspect the function
+                call_names.append(names[-1])
+            elif tok.text == ')' and call_names:
+                call_names.pop(-1)
         
-        if offset + end_col > cursor_pos:
+        tokens.append(tok)
+        
+        if offsets[end_line] + end_col > cursor_pos:
             # we found the cursor, stop reading
             break
         
-        tokens.append(tok)
-        if tok.token == tokenize2.NEWLINE:
-            offset += len(tok.line)
-    
-    if names:
+    if call_names:
+        return call_names[-1]
+    elif names:
         return names[-1]
     else:
         return ''

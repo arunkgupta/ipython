@@ -10,10 +10,15 @@ This is useful for languages that have Python bindings, such as `Octave
 where the REPL can be controlled in a tty using `pexpect <http://pexpect.readthedocs.org/en/latest/>`_,
 such as bash.
 
+.. seealso::
+
+   `bash_kernel <https://github.com/takluyver/bash_kernel>`_
+     A simple kernel for bash, written using this machinery
+
 Required steps
 --------------
 
-Subclass :class:`IPython.kernel.zmq.kernelbase.Kernel`, and implement the
+Subclass :class:`ipykernel.kernelbase.Kernel`, and implement the
 following methods and attributes:
 
 .. class:: MyKernel
@@ -28,6 +33,17 @@ following methods and attributes:
      to the kernel (e.g. IPython), and 'language' refers to the language it
      interprets (e.g. Python). The 'banner' is displayed to the user in console
      UIs before the first prompt. All of these values are strings.
+
+   .. attribute:: language_info
+
+     Language information for :ref:`msging_kernel_info` replies, in a dictionary.
+     This should contain the key ``mimetype`` with the mimetype of code in the
+     target language (e.g. ``'text/x-python'``), and ``file_extension`` (e.g.
+     ``'py'``).
+     It may also contain keys ``codemirror_mode`` and ``pygments_lexer`` if they
+     need to differ from :attr:`language`.
+
+     Other keys may be added to this later.
 
    .. method:: do_execute(code, silent, store_history=True, user_expressions=None, allow_stdin=False)
    
@@ -45,13 +61,13 @@ following methods and attributes:
      
      Your method should return a dict containing the fields described in
      :ref:`execution_results`. To display output, it can send messages
-     using :meth:`~IPython.kernel.zmq.kernelbase.Kernel.send_response`.
+     using :meth:`~ipykernel.kernelbase.Kernel.send_response`.
      See :doc:`messaging` for details of the different message types.
 
 To launch your kernel, add this at the end of your module::
 
     if __name__ == '__main__':
-        from IPython.kernel.zmq.kernelapp import IPKernelApp
+        from ipykernel.kernelapp import IPKernelApp
         IPKernelApp.launch_instance(kernel_class=MyKernel)
 
 Example
@@ -59,19 +75,20 @@ Example
 
 ``echokernel.py`` will simply echo any input it's given to stdout::
 
-    from IPython.kernel.zmq.kernelbase import Kernel
+    from ipykernel.kernelbase import Kernel
 
     class EchoKernel(Kernel):
         implementation = 'Echo'
         implementation_version = '1.0'
         language = 'no-op'
         language_version = '0.1'
+        language_info = {'mimetype': 'text/plain'}
         banner = "Echo kernel - as useful as a parrot"
 
-        def do_execute(self, code, silent, store_history=True, user_experssions=None,
+        def do_execute(self, code, silent, store_history=True, user_expressions=None,
                        allow_stdin=False):
             if not silent:
-                stream_content = {'name': 'stdout', 'data':code}
+                stream_content = {'name': 'stdout', 'text': code}
                 self.send_response(self.iopub_socket, 'stream', stream_content)
 
             return {'status': 'ok',
@@ -82,14 +99,13 @@ Example
                    }
 
     if __name__ == '__main__':
-        from IPython.kernel.zmq.kernelapp import IPKernelApp
+        from ipykernel.kernelapp import IPKernelApp
         IPKernelApp.launch_instance(kernel_class=EchoKernel)
 
 Here's the Kernel spec ``kernel.json`` file for this::
 
     {"argv":["python","-m","echokernel", "-f", "{connection_file}"],
-     "display_name":"Echo",
-     "language":"no-op"
+     "display_name":"Echo"
     }
 
 
@@ -135,6 +151,17 @@ relevant section of the :doc:`messaging spec <messaging>`.
      .. seealso::
      
         :ref:`msging_history` messages
+
+   .. method:: do_is_complete(code)
+   
+     Is code entered in a console-like interface complete and ready to execute,
+     or should a continuation prompt be shown?
+     
+     :param str code: The code entered so far - possibly multiple lines
+     
+     .. seealso::
+     
+        :ref:`msging_is_complete` messages
 
    .. method:: do_shutdown(restart)
 

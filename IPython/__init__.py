@@ -22,6 +22,7 @@ from __future__ import absolute_import
 
 import os
 import sys
+import warnings
 
 #-----------------------------------------------------------------------------
 # Setup everything
@@ -42,13 +43,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "extensions"))
 # Setup the top level names
 #-----------------------------------------------------------------------------
 
-from .config.loader import Config
 from .core.getipython import get_ipython
 from .core import release
 from .core.application import Application
 from .terminal.embed import embed
 
-from .core.error import TryNext
 from .core.interactiveshell import InteractiveShell
 from .testing import test
 from .utils.sysinfo import sys_info
@@ -88,7 +87,7 @@ def embed_kernel(module=None, local_ns=None, **kwargs):
         local_ns = caller_locals
     
     # Only import .zmq when we really need it
-    from IPython.kernel.zmq.embed import embed_kernel as real_embed_kernel
+    from ipykernel.embed import embed_kernel as real_embed_kernel
     real_embed_kernel(module=module, local_ns=local_ns, **kwargs)
 
 def start_ipython(argv=None, **kwargs):
@@ -145,3 +144,14 @@ def start_kernel(argv=None, **kwargs):
     from IPython.kernel.zmq.kernelapp import launch_new_instance
     return launch_new_instance(argv=argv, **kwargs)
     
+# deprecated shim for IPython.Config
+import traitlets.config
+class Config(traitlets.config.Config):
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "IPython.Config is deprecated and will be removed in IPython 5."
+            " Use traitlets.config.Config.",
+            DeprecationWarning, stacklevel=2,
+        )
+        super(Config, self).__init__(*args, **kwargs)
+

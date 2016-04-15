@@ -7,25 +7,10 @@ handling configuration and creating configurables.
 
 The job of an :class:`Application` is to create the master configuration
 object and then create the configurable objects, passing the config to them.
-
-Authors:
-
-* Brian Granger
-* Fernando Perez
-* Min RK
-
 """
 
-#-----------------------------------------------------------------------------
-#  Copyright (C) 2008  The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
-
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
 import atexit
 import glob
@@ -34,22 +19,27 @@ import os
 import shutil
 import sys
 
-from IPython.config.application import Application, catch_config_error
-from IPython.config.loader import ConfigFileNotFound
+from traitlets.config.application import Application, catch_config_error
+from traitlets.config.loader import ConfigFileNotFound, PyFileConfigLoader
 from IPython.core import release, crashhandler
 from IPython.core.profiledir import ProfileDir, ProfileDirError
-from IPython.utils.path import get_ipython_dir, get_ipython_package_dir, ensure_dir_exists
+from IPython.paths import get_ipython_dir, get_ipython_package_dir
+from IPython.utils.path import ensure_dir_exists
 from IPython.utils import py3compat
-from IPython.utils.traitlets import List, Unicode, Type, Bool, Dict, Set, Instance
+from traitlets import List, Unicode, Type, Bool, Dict, Set, Instance, Undefined
 
-#-----------------------------------------------------------------------------
-# Classes and functions
-#-----------------------------------------------------------------------------
+if os.name == 'nt':
+    programdata = os.environ.get('PROGRAMDATA', None)
+    if programdata:
+        SYSTEM_CONFIG_DIRS = [os.path.join(programdata, 'ipython')]
+    else:  # PROGRAMDATA is not defined by default on XP.
+        SYSTEM_CONFIG_DIRS = []
+else:
+    SYSTEM_CONFIG_DIRS = [
+        "/usr/local/etc/ipython",
+        "/etc/ipython",
+    ]
 
-
-#-----------------------------------------------------------------------------
-# Base Application Class
-#-----------------------------------------------------------------------------
 
 # aliases and flags
 
@@ -74,6 +64,19 @@ base_flags = dict(
             """)
 )
 
+class ProfileAwareConfigLoader(PyFileConfigLoader):
+    """A Python file config loader that is aware of IPython profiles."""
+    def load_subconfig(self, fname, path=None, profile=None):
+        if profile is not None:
+            try:
+                profile_dir = ProfileDir.find_profile_dir_by_name(
+                        get_ipython_dir(),
+                        profile,
+                )
+            except ProfileDirError:
+                return
+            path = profile_dir.location
+        return super(ProfileAwareConfigLoader, self).load_subconfig(fname, path=path)
 
 class BaseIPythonApplication(Application):
 
@@ -84,6 +87,9 @@ class BaseIPythonApplication(Application):
     aliases = Dict(base_aliases)
     flags = Dict(base_flags)
     classes = List([ProfileDir])
+    
+    # enable `load_subconfig('cfg.py', profile='name')`
+    python_config_loader_class = ProfileAwareConfigLoader
 
     # Track whether the config_file has changed,
     # because some logic happens only if we aren't using the default.
@@ -100,8 +106,8 @@ class BaseIPythonApplication(Application):
     builtin_profile_dir = Unicode(
         os.path.join(get_ipython_package_dir(), u'config', u'profile', u'default')
     )
-
-    config_file_paths = List(Unicode)
+    
+    config_file_paths = List(Unicode())
     def _config_file_paths_default(self):
         return [py3compat.getcwd()]
 
@@ -141,7 +147,7 @@ class BaseIPythonApplication(Application):
         return d
     
     _in_init_profile_dir = False
-    profile_dir = Instance(ProfileDir)
+    profile_dir = Instance(ProfileDir, allow_none=True)
     def _profile_dir_default(self):
         # avoid recursion
         if self._in_init_profile_dir:
@@ -155,7 +161,7 @@ class BaseIPythonApplication(Application):
     auto_create = Bool(False, config=True,
         help="""Whether to create profile dir if it doesn't exist""")
 
-    config_files = List(Unicode)
+    config_files = List(Unicode())
     def _config_files_default(self):
         return [self.config_file_name]
 
@@ -179,15 +185,26 @@ class BaseIPythonApplication(Application):
         super(BaseIPythonApplication, self).__init__(**kwargs)
         # ensure current working directory exists
         try:
-            directory = py3compat.getcwd()
+            py3compat.getcwd()
         except:
-            # raise exception
+            # exit if cwd doesn't exist
             self.log.error("Current working directory doesn't exist.")
-            raise
+            self.exit(1)
 
     #-------------------------------------------------------------------------
     # Various stages of Application creation
     #-------------------------------------------------------------------------
+    
+    deprecated_subcommands = {}
+    
+    def initialize_subcommand(self, subc, argv=None):
+        if subc in self.deprecated_subcommands:
+            import time
+            self.log.warning("Subcommand `ipython {sub}` is deprecated and will be removed "
+                             "in future versions.".format(sub=subc))
+            self.log.warning("You likely want to use `jupyter {sub}` in the "
+                             "future".format(sub=subc))
+        return super(BaseIPythonApplication, self).initialize_subcommand(subc, argv)
 
     def init_crash_handler(self):
         """Create a crash handler, typically setting sys.excepthook to it."""
@@ -210,11 +227,12 @@ class BaseIPythonApplication(Application):
             return crashhandler.crash_handler_lite(etype, evalue, tb)
     
     def _ipython_dir_changed(self, name, old, new):
-        str_old = py3compat.cast_bytes_py2(os.path.abspath(old),
-            sys.getfilesystemencoding()
-        )
-        if str_old in sys.path:
-            sys.path.remove(str_old)
+        if old is not Undefined:
+            str_old = py3compat.cast_bytes_py2(os.path.abspath(old),
+                sys.getfilesystemencoding()
+            )
+            if str_old in sys.path:
+                sys.path.remove(str_old)
         str_path = py3compat.cast_bytes_py2(os.path.abspath(new),
             sys.getfilesystemencoding()
         )
@@ -228,7 +246,7 @@ class BaseIPythonApplication(Application):
             path = os.path.join(new, d)
             try:
                 ensure_dir_exists(path)
-            except OSError:
+            except OSError as e:
                 # this will not be EEXIST
                 self.log.error("couldn't create path %s: %s", path, e)
         self.log.debug("IPYTHONDIR set to: %s" % new)
@@ -269,15 +287,15 @@ class BaseIPythonApplication(Application):
             except ConfigFileNotFound:
                 # Only warn if the default config file was NOT being used.
                 if config_file_name in self.config_file_specified:
-                    msg = self.log.warn
+                    msg = self.log.warning
                 else:
                     msg = self.log.debug
                 msg("Config file not found, skipping: %s", config_file_name)
-            except:
+            except Exception:
                 # For testing purposes.
                 if not suppress_errors:
                     raise
-                self.log.warn("Error loading config file: %s" %
+                self.log.warning("Error loading config file: %s" %
                               self.config_file_name, exc_info=True)
 
     def init_profile_dir(self):
@@ -304,7 +322,7 @@ class BaseIPythonApplication(Application):
                     self.log.fatal("Profile %r not found."%self.profile)
                     self.exit(1)
             else:
-                self.log.info("Using existing profile dir: %r"%p.location)
+                self.log.debug("Using existing profile dir: %r"%p.location)
         else:
             location = self.config.ProfileDir.location
             # location is fully specified
@@ -319,7 +337,7 @@ class BaseIPythonApplication(Application):
                         self.log.fatal("Could not create profile directory: %r"%location)
                         self.exit(1)
                     else:
-                        self.log.info("Creating new profile dir: %r"%location)
+                        self.log.debug("Creating new profile dir: %r"%location)
                 else:
                     self.log.fatal("Profile directory %r not found."%location)
                     self.exit(1)
@@ -336,6 +354,7 @@ class BaseIPythonApplication(Application):
 
     def init_config_files(self):
         """[optionally] copy default config files into profile dir."""
+        self.config_file_paths.extend(SYSTEM_CONFIG_DIRS)
         # copy config files
         path = self.builtin_profile_dir
         if self.copy_config_files:
@@ -343,7 +362,7 @@ class BaseIPythonApplication(Application):
 
             cfg = self.config_file_name
             if path and os.path.exists(os.path.join(path, cfg)):
-                self.log.warn("Staging %r from %s into %r [overwrite=%s]"%(
+                self.log.warning("Staging %r from %s into %r [overwrite=%s]"%(
                         cfg, src, self.profile_dir.location, self.overwrite)
                 )
                 self.profile_dir.copy_config_file(cfg, path=path, overwrite=self.overwrite)
@@ -358,7 +377,7 @@ class BaseIPythonApplication(Application):
                 cfg = os.path.basename(fullpath)
                 if self.profile_dir.copy_config_file(cfg, path=path, overwrite=False):
                     # file was copied
-                    self.log.warn("Staging bundled %s from %s into %r"%(
+                    self.log.warning("Staging bundled %s from %s into %r"%(
                             cfg, self.profile, self.profile_dir.location)
                     )
 
@@ -368,7 +387,7 @@ class BaseIPythonApplication(Application):
         s = self.generate_config_file()
         fname = os.path.join(self.profile_dir.location, self.config_file_name)
         if self.overwrite or not os.path.exists(fname):
-            self.log.warn("Generating default config file: %r"%(fname))
+            self.log.warning("Generating default config file: %r"%(fname))
             with open(fname, 'w') as f:
                 f.write(s)
 
@@ -386,4 +405,3 @@ class BaseIPythonApplication(Application):
         self.load_config_file()
         # enforce cl-opts override configfile opts:
         self.update_config(cl_config)
-

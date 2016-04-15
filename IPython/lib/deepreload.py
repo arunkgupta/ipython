@@ -93,7 +93,7 @@ def get_parent(globals, level):
         else:
             # Normal module, so work out the package name if any
             lastdot = modname.rfind('.')
-            if lastdot < 0 and level > 0:
+            if lastdot < 0 < level:
                 raise ValueError("Attempted relative import in non-package")
             if lastdot < 0:
                 globals['__package__'] = None
@@ -327,7 +327,7 @@ except AttributeError:
     original_reload = imp.reload    # Python 3
 
 # Replacement for reload()
-def reload(module, exclude=['sys', 'os.path', builtin_mod_name, '__main__']):
+def reload(module, exclude=('sys', 'os.path', builtin_mod_name, '__main__')):
     """Recursively reload all modules used in the given module.  Optionally
     takes a list of modules to exclude from reloading.  The default exclude
     list contains sys, __main__, and __builtin__, to prevent, e.g., resetting
@@ -341,6 +341,20 @@ def reload(module, exclude=['sys', 'os.path', builtin_mod_name, '__main__']):
             return deep_reload_hook(module)
     finally:
         found_now = {}
+
+
+def _dreload(module, **kwargs):
+    """
+    **deprecated**
+
+    import reload explicitly from `IPython.lib.deepreload` to use it
+
+    """
+    warn("""
+injecting `dreload` in interactive namespace is deprecated, and will be removed in IPython 5.0. 
+Please import `reload` explicitly from `IPython.lib.deepreload`.
+""", DeprecationWarning, stacklevel=2)
+    reload(module, **kwargs)
 
 # Uncomment the following to automatically activate deep reloading whenever
 # this module is imported

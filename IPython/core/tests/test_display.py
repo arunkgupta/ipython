@@ -1,17 +1,17 @@
-#-----------------------------------------------------------------------------
-#  Copyright (C) 2010-2011 The IPython Development Team.
-#
-#  Distributed under the terms of the BSD License.
-#
-#  The full license is in the file COPYING.txt, distributed with this software.
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
+
+import json
+import tempfile
 import os
+import warnings
 
 import nose.tools as nt
 
 from IPython.core import display
 from IPython.core.getipython import get_ipython
-from IPython.utils import path as ipath
+from IPython.utils.tempdir import NamedFileInTemporaryDirectory
+from IPython import paths as ipath
 
 import IPython.testing.decorators as dec
 
@@ -24,6 +24,8 @@ def test_image_size():
     nt.assert_equal(u'<img src="%s" width="200"/>' % (thisurl), img._repr_html_())
     img = display.Image(url=thisurl)
     nt.assert_equal(u'<img src="%s"/>' % (thisurl), img._repr_html_())
+    img = display.Image(url=thisurl, unconfined=True)
+    nt.assert_equal(u'<img src="%s" class="unconfined"/>' % (thisurl), img._repr_html_())
 
 def test_retina_png():
     here = os.path.dirname(__file__)
@@ -43,6 +45,9 @@ def test_retina_jpeg():
     nt.assert_equal(md['width'], 1)
     nt.assert_equal(md['height'], 1)
 
+def test_base64image():
+    display.Image("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEUAAACnej3aAAAAAWJLR0QAiAUdSAAAAAlwSFlzAAALEwAACxMBAJqcGAAAAAd0SU1FB94BCRQnOqNu0b4AAAAKSURBVAjXY2AAAAACAAHiIbwzAAAAAElFTkSuQmCC")
+
 def test_image_filename_defaults():
     '''test format constraint, and validity of jpeg and png'''
     tpath = ipath.get_ipython_package_dir()
@@ -50,11 +55,8 @@ def test_image_filename_defaults():
                      embed=True)
     nt.assert_raises(ValueError, display.Image)
     nt.assert_raises(ValueError, display.Image, data='this is not an image', format='badformat', embed=True)
-    from IPython.html import DEFAULT_STATIC_FILES_PATH
     # check boths paths to allow packages to test at build and install time
-    imgfile = os.path.join(tpath, 'html/static/base/images/ipynblogo.png')
-    if not os.path.exists(imgfile):
-        imgfile = os.path.join(DEFAULT_STATIC_FILES_PATH, 'base/images/ipynblogo.png')
+    imgfile = os.path.join(tpath, 'core/tests/2x2.png')
     img = display.Image(filename=imgfile)
     nt.assert_equal('png', img.format)
     nt.assert_is_not_none(img._repr_png_())
@@ -63,7 +65,7 @@ def test_image_filename_defaults():
     nt.assert_is_none(img._repr_jpeg_())
 
 def _get_inline_config():
-    from IPython.kernel.zmq.pylab.config import InlineBackend
+    from ipykernel.pylab.config import InlineBackend
     return InlineBackend.instance()
     
 @dec.skip_without('matplotlib')
@@ -130,3 +132,61 @@ def test_displayobject_repr():
     nt.assert_equal(repr(j), object.__repr__(j))
     j._show_mem_addr = False
     nt.assert_equal(repr(j), '<IPython.core.display.Javascript object>')
+
+def test_json():
+    d = {'a': 5}
+    lis = [d]
+    j = display.JSON(d)
+    nt.assert_equal(j._repr_json_(), d)
+    
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        j = display.JSON(json.dumps(d))
+        nt.assert_equal(len(w), 1)
+        nt.assert_equal(j._repr_json_(), d)
+    
+    j = display.JSON(lis)
+    nt.assert_equal(j._repr_json_(), lis)
+    
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        j = display.JSON(json.dumps(lis))
+        nt.assert_equal(len(w), 1)
+        nt.assert_equal(j._repr_json_(), lis)
+    
+def test_video_embedding():
+    """use a tempfile, with dummy-data, to ensure that video embedding doesn't crash"""
+    v = display.Video("http://ignored")
+    assert not v.embed
+    html = v._repr_html_()
+    nt.assert_not_in('src="data:', html)
+    nt.assert_in('src="http://ignored"', html)
+
+    with nt.assert_raises(ValueError):
+        v = display.Video(b'abc')
+
+    with NamedFileInTemporaryDirectory('test.mp4') as f:
+        f.write(b'abc')
+        f.close()
+
+        v = display.Video(f.name)
+        assert not v.embed
+        html = v._repr_html_()
+        nt.assert_not_in('src="data:', html)
+        
+        v = display.Video(f.name, embed=True)
+        html = v._repr_html_()
+        nt.assert_in('src="data:video/mp4;base64,YWJj"',html)
+        
+        v = display.Video(f.name, embed=True, mimetype='video/other')
+        html = v._repr_html_()
+        nt.assert_in('src="data:video/other;base64,YWJj"',html)
+        
+        v = display.Video(b'abc', embed=True, mimetype='video/mp4')
+        html = v._repr_html_()
+        nt.assert_in('src="data:video/mp4;base64,YWJj"',html)
+
+        v = display.Video(u'YWJj', embed=True, mimetype='video/xyz')
+        html = v._repr_html_()
+        nt.assert_in('src="data:video/xyz;base64,YWJj"',html)
+

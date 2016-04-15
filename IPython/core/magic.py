@@ -23,17 +23,17 @@ import types
 from getopt import getopt, GetoptError
 
 # Our own
-from IPython.config.configurable import Configurable
+from traitlets.config.configurable import Configurable
 from IPython.core import oinspect
 from IPython.core.error import UsageError
 from IPython.core.inputsplitter import ESC_MAGIC, ESC_MAGIC2
-from IPython.external.decorator import decorator
+from decorator import decorator
 from IPython.utils.ipstruct import Struct
 from IPython.utils.process import arg_split
 from IPython.utils.py3compat import string_types, iteritems
 from IPython.utils.text import dedent
-from IPython.utils.traitlets import Bool, Dict, Instance, MetaHasTraits
-from IPython.utils.warn import error
+from traitlets import Bool, Dict, Instance
+from logging import error
 
 #-----------------------------------------------------------------------------
 # Globals
@@ -296,12 +296,12 @@ class MagicsManager(Configurable):
     # A two-level dict, first keyed by magic type, then by magic function, and
     # holding the actual callable object as value.  This is the dict used for
     # magic function dispatch
-    magics = Dict
+    magics = Dict()
 
     # A registry of the original objects that we've been given holding magics.
-    registry = Dict
+    registry = Dict()
 
-    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
+    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC', allow_none=True)
 
     auto_magic = Bool(True, config=True, help=
         "Automatically call line magics without requiring explicit % prefix")
@@ -313,7 +313,7 @@ class MagicsManager(Configurable):
         'Automagic is OFF, % prefix IS needed for line magics.',
         'Automagic is ON, % prefix IS NOT needed for line magics.']
 
-    user_magics = Instance('IPython.core.magics.UserMagics')
+    user_magics = Instance('IPython.core.magics.UserMagics', allow_none=True)
 
     def __init__(self, shell=None, config=None, user_magics=None, **traits):
 
@@ -386,7 +386,7 @@ class MagicsManager(Configurable):
             if not m.registered:
                 raise ValueError("Class of magics %r was constructed without "
                                  "the @register_magics class decorator")
-            if type(m) in (type, MetaHasTraits):
+            if isinstance(m, type):
                 # If we're given an uninstantiated class
                 m = m(shell=self.shell)
 
@@ -432,6 +432,8 @@ class MagicsManager(Configurable):
 
     def define_magic(self, name, func):
         """[Deprecated] Expose own function as magic function for IPython.
+
+        Will be removed in IPython 5.0
 
         Example::
 
@@ -518,7 +520,6 @@ class Magics(Configurable):
                 shell.configurables.append(self)
             if hasattr(shell, 'config'):
                 kwargs.setdefault('parent', shell)
-            kwargs['shell'] = shell
 
         self.shell = shell
         self.options_table = {}

@@ -17,7 +17,7 @@ import json
 try:
     import requests_cache
 except ImportError:
-    print("no cache", file=sys.stderr)
+    print("cache not available, install `requests_cache` for caching.", file=sys.stderr)
 else:
     requests_cache.install_cache("gh_api", expire_after=3600)
 
@@ -64,6 +64,13 @@ def get_auth_token():
     }
     response = requests.post('https://api.github.com/authorizations',
                             auth=(user, pw), data=json.dumps(auth_request))
+    if response.status_code == 401 and response.headers.get('X-GitHub-OTP') == 'required; sms':
+        print("Your login API resquest a SMS one time password")
+        sms_pw = getpass.getpass("SMS password: ")
+        response = requests.post('https://api.github.com/authorizations',
+                            auth=(user, pw), 
+                            data=json.dumps(auth_request),
+                            headers={'X-GitHub-OTP':sms_pw})
     response.raise_for_status()
     token = json.loads(response.text)['token']
     keyring.set_password('github', fake_username, token)
@@ -103,6 +110,7 @@ def get_pull_request(project, num, auth=False):
         header = make_auth_header()
     else:
         header = None
+    print("fetching %s" % url, file=sys.stderr)
     response = requests.get(url, headers=header)
     response.raise_for_status()
     return json.loads(response.text, object_hook=Obj)
@@ -161,6 +169,7 @@ def get_issues_list(project, auth=False, **params):
     return pages
 
 def get_milestones(project, auth=False, **params):
+    params.setdefault('state', 'all')
     url = "https://api.github.com/repos/{project}/milestones".format(project=project)
     if auth:
         headers = make_auth_header()

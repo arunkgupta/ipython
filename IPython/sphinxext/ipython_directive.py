@@ -126,27 +126,23 @@ from __future__ import print_function
 #-----------------------------------------------------------------------------
 
 # Stdlib
+import atexit
 import os
 import re
 import sys
 import tempfile
 import ast
 import warnings
+import shutil
 
-# To keep compatibility with various python versions
-try:
-    from hashlib import md5
-except ImportError:
-    from md5 import md5
 
 # Third-party
-import sphinx
 from docutils.parsers.rst import directives
-from docutils import nodes
 from sphinx.util.compat import Directive
 
 # Our own
-from IPython import Config, InteractiveShell
+from traitlets.config import Config
+from IPython import InteractiveShell
 from IPython.core.profiledir import ProfileDir
 from IPython.utils import io
 from IPython.utils.py3compat import PY3
@@ -169,7 +165,7 @@ COMMENT, INPUT, OUTPUT =  range(3)
 def block_parser(part, rgxin, rgxout, fmtin, fmtout):
     """
     part is a string of ipython text, comprised of at most one
-    input, one ouput, comments, and blank lines.  The block parser
+    input, one output, comments, and blank lines.  The block parser
     parses the text into a list of::
 
       blocks = [ (TOKEN0, data0), (TOKEN1, data1), ...]
@@ -282,6 +278,7 @@ class EmbeddedSphinxShell(object):
 
         # Create config object for IPython
         config = Config()
+        config.HistoryManager.hist_file = ':memory:'
         config.InteractiveShell.autocall = False
         config.InteractiveShell.autoindent = False
         config.InteractiveShell.colors = 'NoColor'
@@ -295,6 +292,7 @@ class EmbeddedSphinxShell(object):
         # Create and initialize global ipython, but don't start its mainloop.
         # This will persist across different EmbededSphinxShell instances.
         IP = InteractiveShell.instance(config=config, profile_dir=profile)
+        atexit.register(self.cleanup)
 
         # io.stdout redirect must be done after instantiating InteractiveShell
         io.stdout = self.cout
@@ -312,6 +310,7 @@ class EmbeddedSphinxShell(object):
 
         self.input = ''
         self.output = ''
+        self.tmp_profile_dir = tmp_profile_dir
 
         self.is_verbatim = False
         self.is_doctest = False
@@ -331,6 +330,9 @@ class EmbeddedSphinxShell(object):
         # Prepopulate the namespace.
         for line in exec_lines:
             self.process_input_line(line, store_history=False)
+
+    def cleanup(self):
+        shutil.rmtree(self.tmp_profile_dir, ignore_errors=True)
 
     def clear_cout(self):
         self.cout.seek(0)
@@ -649,14 +651,41 @@ class EmbeddedSphinxShell(object):
         image_file = None
         image_directive = None
 
+        found_input = False
         for token, data in block:
             if token == COMMENT:
                 out_data = self.process_comment(data)
             elif token == INPUT:
+                found_input = True
                 (out_data, input_lines, output, is_doctest,
                  decorator, image_file, image_directive) = \
                           self.process_input(data, input_prompt, lineno)
             elif token == OUTPUT:
+                if not found_input:
+
+                    TAB = ' ' * 4
+                    linenumber = 0
+                    source = 'Unavailable'
+                    content = 'Unavailable'
+                    if self.directive:
+                        linenumber = self.directive.state.document.current_line
+                        source = self.directive.state.document.current_source
+                        content = self.directive.content
+                        # Add tabs and join into a single string.
+                        content = '\n'.join([TAB + line for line in content])
+
+                    e = ('\n\nInvalid block: Block contains an output prompt '
+                         'without an input prompt.\n\n'
+                         'Document source: {0}\n\n'
+                         'Content begins at line {1}: \n\n{2}\n\n'
+                         'Problematic block within content: \n\n{TAB}{3}\n\n')
+                    e = e.format(source, linenumber, content, block, TAB=TAB)
+
+                    # Write, rather than include in exception, since Sphinx
+                    # will truncate tracebacks.
+                    sys.stdout.write(e)
+                    raise RuntimeError('An invalid block was detected.')
+
                 out_data = \
                     self.process_output(data, output_prompt, input_lines,
                                         output, is_doctest, decorator,
@@ -821,14 +850,14 @@ class IPythonDirective(Directive):
         config = self.state.document.settings.env.config
 
         # get config variables to set figure output directory
-        confdir = self.state.document.settings.env.app.confdir
+        outdir = self.state.document.settings.env.app.outdir
         savefig_dir = config.ipython_savefig_dir
         source_dir = os.path.dirname(self.state.document.current_source)
         if savefig_dir is None:
-            savefig_dir = config.html_static_path
+            savefig_dir = config.html_static_path or '_static'
         if isinstance(savefig_dir, list):
-            savefig_dir = savefig_dir[0] # safe to assume only one path?
-        savefig_dir = os.path.join(confdir, savefig_dir)
+            savefig_dir = os.path.join(*savefig_dir)
+        savefig_dir = os.path.join(outdir, savefig_dir)
 
         # get regex and prompt stuff
         rgxin      = config.ipython_rgxin
@@ -915,6 +944,8 @@ class IPythonDirective(Directive):
             content = self.content
             self.content = self.shell.process_pure_python(content)
 
+        # parts consists of all text within the ipython-block.
+        # Each part is an input/output block.
         parts = '\n'.join(self.content).split('\n\n')
 
         lines = ['.. code-block:: ipython', '']
@@ -976,6 +1007,9 @@ def setup(app):
     app.add_config_value('ipython_execlines', execlines, 'env')
 
     app.add_config_value('ipython_holdcount', True, 'env')
+
+    metadata = {'parallel_read_safe': True, 'parallel_write_safe': True}
+    return metadata
 
 # Simple smoke test, needs to be converted to a proper automatic test.
 def test():

@@ -1,28 +1,24 @@
-"""Tests for IPython.lib.pretty.
-"""
-#-----------------------------------------------------------------------------
-# Copyright (c) 2011, the IPython Development Team.
-#
-# Distributed under the terms of the Modified BSD License.
-#
-# The full license is in the file COPYING.txt, distributed with this software.
-#-----------------------------------------------------------------------------
+# coding: utf-8
+"""Tests for IPython.lib.pretty."""
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
+
 from __future__ import print_function
 
-# Third-party imports
+from collections import Counter, defaultdict, deque, OrderedDict
+
 import nose.tools as nt
 
-# Our own imports
 from IPython.lib import pretty
-from IPython.testing.decorators import skip_without
+from IPython.testing.decorators import skip_without, py2_only
+from IPython.utils.py3compat import PY3, unicode_to_str
 
-#-----------------------------------------------------------------------------
-# Classes and functions
-#-----------------------------------------------------------------------------
+if PY3:
+    from io import StringIO
+else:
+    from StringIO import StringIO
+
 
 class MyList(object):
     def __init__(self, content):
@@ -161,11 +157,9 @@ def test_pprint_break_repr():
     nt.assert_equal(output, expected)
 
 def test_bad_repr():
-    """Don't raise, even when repr fails"""
-    output = pretty.pretty(BadRepr())
-    nt.assert_in("failed", output)
-    nt.assert_in("at 0x", output)
-    nt.assert_in("test_pretty", output)
+    """Don't catch bad repr errors"""
+    with nt.assert_raises(ZeroDivisionError):
+        output = pretty.pretty(BadRepr())
 
 class BadException(Exception):
     def __str__(self):
@@ -181,10 +175,8 @@ class ReallyBadRepr(object):
         raise BadException()
 
 def test_really_bad_repr():
-    output = pretty.pretty(ReallyBadRepr())
-    nt.assert_in("failed", output)
-    nt.assert_in("BadException: unknown", output)
-    nt.assert_in("unknown type", output)
+    with nt.assert_raises(BadException):
+        output = pretty.pretty(ReallyBadRepr())
 
 
 class SA(object):
@@ -229,3 +221,218 @@ def test_long_dict():
 def test_unbound_method():
     output = pretty.pretty(MyObj.somemethod)
     nt.assert_in('MyObj.somemethod', output)
+
+
+class MetaClass(type):
+    def __new__(cls, name):
+        return type.__new__(cls, name, (object,), {'name': name})
+
+    def __repr__(self):
+        return "[CUSTOM REPR FOR CLASS %s]" % self.name
+
+
+ClassWithMeta = MetaClass('ClassWithMeta')
+
+
+def test_metaclass_repr():
+    output = pretty.pretty(ClassWithMeta)
+    nt.assert_equal(output, "[CUSTOM REPR FOR CLASS ClassWithMeta]")
+
+
+def test_unicode_repr():
+    u = u"üniçodé"
+    ustr = unicode_to_str(u)
+    
+    class C(object):
+        def __repr__(self):
+            return ustr
+    
+    c = C()
+    p = pretty.pretty(c)
+    nt.assert_equal(p, u)
+    p = pretty.pretty([c])
+    nt.assert_equal(p, u'[%s]' % u)
+
+
+def test_basic_class():
+    def type_pprint_wrapper(obj, p, cycle):
+        if obj is MyObj:
+            type_pprint_wrapper.called = True
+        return pretty._type_pprint(obj, p, cycle)
+    type_pprint_wrapper.called = False
+
+    stream = StringIO()
+    printer = pretty.RepresentationPrinter(stream)
+    printer.type_pprinters[type] = type_pprint_wrapper
+    printer.pretty(MyObj)
+    printer.flush()
+    output = stream.getvalue()
+
+    nt.assert_equal(output, '%s.MyObj' % __name__)
+    nt.assert_true(type_pprint_wrapper.called)
+
+
+# This is only run on Python 2 because in Python 3 the language prevents you
+# from setting a non-unicode value for __qualname__ on a metaclass, and it
+# doesn't respect the descriptor protocol if you subclass unicode and implement
+# __get__.
+@py2_only
+def test_fallback_to__name__on_type():
+    # Test that we correctly repr types that have non-string values for
+    # __qualname__ by falling back to __name__
+
+    class Type(object):
+        __qualname__ = 5
+
+    # Test repring of the type.
+    stream = StringIO()
+    printer = pretty.RepresentationPrinter(stream)
+
+    printer.pretty(Type)
+    printer.flush()
+    output = stream.getvalue()
+
+    # If __qualname__ is malformed, we should fall back to __name__.
+    expected = '.'.join([__name__, Type.__name__])
+    nt.assert_equal(output, expected)
+
+    # Clear stream buffer.
+    stream.buf = ''
+
+    # Test repring of an instance of the type.
+    instance = Type()
+    printer.pretty(instance)
+    printer.flush()
+    output = stream.getvalue()
+
+    # Should look like:
+    # <IPython.lib.tests.test_pretty.Type at 0x7f7658ae07d0>
+    prefix = '<' + '.'.join([__name__, Type.__name__]) + ' at 0x'
+    nt.assert_true(output.startswith(prefix))
+
+
+@py2_only
+def test_fail_gracefully_on_bogus__qualname__and__name__():
+    # Test that we correctly repr types that have non-string values for both
+    # __qualname__ and __name__
+
+    class Meta(type):
+        __name__ = 5
+
+    class Type(object):
+        __metaclass__ = Meta
+        __qualname__ = 5
+
+    stream = StringIO()
+    printer = pretty.RepresentationPrinter(stream)
+
+    printer.pretty(Type)
+    printer.flush()
+    output = stream.getvalue()
+
+    # If we can't find __name__ or __qualname__ just use a sentinel string.
+    expected = '.'.join([__name__, '<unknown type>'])
+    nt.assert_equal(output, expected)
+
+    # Clear stream buffer.
+    stream.buf = ''
+
+    # Test repring of an instance of the type.
+    instance = Type()
+    printer.pretty(instance)
+    printer.flush()
+    output = stream.getvalue()
+
+    # Should look like:
+    # <IPython.lib.tests.test_pretty.<unknown type> at 0x7f7658ae07d0>
+    prefix = '<' + '.'.join([__name__, '<unknown type>']) + ' at 0x'
+    nt.assert_true(output.startswith(prefix))
+
+
+def test_collections_defaultdict():
+    # Create defaultdicts with cycles
+    a = defaultdict()
+    a.default_factory = a
+    b = defaultdict(list)
+    b['key'] = b
+
+    # Dictionary order cannot be relied on, test against single keys.
+    cases = [
+        (defaultdict(list), 'defaultdict(list, {})'),
+        (defaultdict(list, {'key': '-' * 50}),
+         "defaultdict(list,\n"
+         "            {'key': '--------------------------------------------------'})"),
+        (a, 'defaultdict(defaultdict(...), {})'),
+        (b, "defaultdict(list, {'key': defaultdict(...)})"),
+    ]
+    for obj, expected in cases:
+        nt.assert_equal(pretty.pretty(obj), expected)
+
+
+def test_collections_ordereddict():
+    # Create OrderedDict with cycle
+    a = OrderedDict()
+    a['key'] = a
+
+    cases = [
+        (OrderedDict(), 'OrderedDict()'),
+        (OrderedDict((i, i) for i in range(1000, 1010)),
+         'OrderedDict([(1000, 1000),\n'
+         '             (1001, 1001),\n'
+         '             (1002, 1002),\n'
+         '             (1003, 1003),\n'
+         '             (1004, 1004),\n'
+         '             (1005, 1005),\n'
+         '             (1006, 1006),\n'
+         '             (1007, 1007),\n'
+         '             (1008, 1008),\n'
+         '             (1009, 1009)])'),
+        (a, "OrderedDict([('key', OrderedDict(...))])"),
+    ]
+    for obj, expected in cases:
+        nt.assert_equal(pretty.pretty(obj), expected)
+
+
+def test_collections_deque():
+    # Create deque with cycle
+    a = deque()
+    a.append(a)
+
+    cases = [
+        (deque(), 'deque([])'),
+        (deque(i for i in range(1000, 1020)),
+         'deque([1000,\n'
+         '       1001,\n'
+         '       1002,\n'
+         '       1003,\n'
+         '       1004,\n'
+         '       1005,\n'
+         '       1006,\n'
+         '       1007,\n'
+         '       1008,\n'
+         '       1009,\n'
+         '       1010,\n'
+         '       1011,\n'
+         '       1012,\n'
+         '       1013,\n'
+         '       1014,\n'
+         '       1015,\n'
+         '       1016,\n'
+         '       1017,\n'
+         '       1018,\n'
+         '       1019])'),
+        (a, 'deque([deque(...)])'),
+    ]
+    for obj, expected in cases:
+        nt.assert_equal(pretty.pretty(obj), expected)
+
+def test_collections_counter():
+    class MyCounter(Counter):
+        pass
+    cases = [
+        (Counter(), 'Counter()'),
+        (Counter(a=1), "Counter({'a': 1})"),
+        (MyCounter(a=1), "MyCounter({'a': 1})"),
+    ]
+    for obj, expected in cases:
+        nt.assert_equal(pretty.pretty(obj), expected)

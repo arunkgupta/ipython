@@ -15,14 +15,19 @@ import argparse
 import json
 import multiprocessing.pool
 import os
+import stat
+import re
+import requests
 import shutil
 import signal
 import sys
 import subprocess
 import time
-import re
 
-from .iptest import have, test_group_names as py_test_group_names, test_sections, StreamCapturer
+from .iptest import (
+    have, test_group_names as py_test_group_names, test_sections, StreamCapturer,
+    test_for,
+)
 from IPython.utils.path import compress_user
 from IPython.utils.py3compat import bytes_to_str
 from IPython.utils.sysinfo import get_sys_info
@@ -77,18 +82,24 @@ class TestController(object):
         """
         pass
 
-    def launch(self, buffer_output=False):
+    def launch(self, buffer_output=False, capture_output=False):
         # print('*** ENV:', self.env)  # dbg
         # print('*** CMD:', self.cmd)  # dbg
         env = os.environ.copy()
         env.update(self.env)
-        output = subprocess.PIPE if buffer_output else None
-        stdout = subprocess.STDOUT if buffer_output else None
-        self.process = subprocess.Popen(self.cmd, stdout=output,
-                stderr=stdout, env=env)
+        if buffer_output:
+            capture_output = True
+        self.stdout_capturer = c = StreamCapturer(echo=not buffer_output)
+        c.start()
+        stdout = c.writefd if capture_output else None
+        stderr = subprocess.STDOUT if capture_output else None
+        self.process = subprocess.Popen(self.cmd, stdout=stdout,
+                stderr=stderr, env=env)
 
     def wait(self):
-        self.stdout, _ = self.process.communicate()
+        self.process.wait()
+        self.stdout_capturer.halt()
+        self.stdout = self.stdout_capturer.get_buffer()
         return self.process.returncode
 
     def print_extra_info(self):
@@ -159,6 +170,21 @@ class PyTestController(TestController):
         self.env['IPTEST_WORKING_DIR'] = workingdir.name
         # This means we won't get odd effects from our own matplotlib config
         self.env['MPLCONFIGDIR'] = workingdir.name
+        # For security reasons (http://bugs.python.org/issue16202), use
+        # a temporary directory to which other users have no access.
+        self.env['TMPDIR'] = workingdir.name
+
+        # Add a non-accessible directory to PATH (see gh-7053)
+        noaccess = os.path.join(self.workingdir.name, "_no_access_")
+        self.noaccess = noaccess
+        os.mkdir(noaccess, 0)
+
+        PATH = os.environ.get('PATH', '')
+        if PATH:
+            PATH = noaccess + os.pathsep + PATH
+        else:
+            PATH = noaccess
+        self.env['PATH'] = PATH
 
         # From options:
         if self.options.xunit:
@@ -167,6 +193,14 @@ class PyTestController(TestController):
             self.add_coverage()
         self.env['IPTEST_SUBPROC_STREAMS'] = self.options.subproc_streams
         self.cmd.extend(self.options.extra_args)
+
+    def cleanup(self):
+        """
+        Make the non-accessible directory created in setup() accessible
+        again, otherwise deleting the workingdir will fail.
+        """
+        os.chmod(self.noaccess, stat.S_IRWXU)
+        TestController.cleanup(self)
 
     @property
     def will_run(self):
@@ -203,200 +237,15 @@ class PyTestController(TestController):
         super(PyTestController, self).launch(buffer_output=buffer_output)
 
 
-js_prefix = 'js/'
-
-def get_js_test_dir():
-    import IPython.html.tests as t
-    return os.path.join(os.path.dirname(t.__file__), '')
-
-def all_js_groups():
-    import glob
-    test_dir = get_js_test_dir()
-    all_subdirs = glob.glob(test_dir + '[!_]*/')
-    return [js_prefix+os.path.relpath(x, test_dir) for x in all_subdirs]
-
-class JSController(TestController):
-    """Run CasperJS tests """
-    requirements =  ['zmq', 'tornado', 'jinja2', 'casperjs', 'sqlite3',
-                     'jsonschema', 'jsonpointer']
-    display_slimer_output = False
-
-    def __init__(self, section, xunit=True, engine='phantomjs'):
-        """Create new test runner."""
-        TestController.__init__(self)
-        self.engine = engine
-        self.section = section
-        self.xunit = xunit
-        self.slimer_failure = re.compile('^FAIL.*', flags=re.MULTILINE)
-        js_test_dir = get_js_test_dir()
-        includes = '--includes=' + os.path.join(js_test_dir,'util.js')
-        test_cases = os.path.join(js_test_dir, self.section[len(js_prefix):])
-        self.cmd = ['casperjs', 'test', includes, test_cases, '--engine=%s' % self.engine]
-
-    def setup(self):
-        self.ipydir = TemporaryDirectory()
-        self.nbdir = TemporaryDirectory()
-        self.dirs.append(self.ipydir)
-        self.dirs.append(self.nbdir)
-        os.makedirs(os.path.join(self.nbdir.name, os.path.join(u'sub ∂ir1', u'sub ∂ir 1a')))
-        os.makedirs(os.path.join(self.nbdir.name, os.path.join(u'sub ∂ir2', u'sub ∂ir 1b')))
-
-        if self.xunit:
-            self.add_xunit()
-
-        # start the ipython notebook, so we get the port number
-        self.server_port = 0
-        self._init_server()
-        if self.server_port:
-            self.cmd.append("--port=%i" % self.server_port)
-        else:
-            # don't launch tests if the server didn't start
-            self.cmd = [sys.executable, '-c', 'raise SystemExit(1)']
-
-    def add_xunit(self):
-        xunit_file = os.path.abspath(self.section.replace('/','.') + '.xunit.xml')
-        self.cmd.append('--xunit=%s' % xunit_file)
-
-    def launch(self, buffer_output):
-        # If the engine is SlimerJS, we need to buffer the output because
-        # SlimerJS does not support exit codes, so CasperJS always returns 0.
-        if self.engine == 'slimerjs' and not buffer_output:
-            self.display_slimer_output = True
-            return super(JSController, self).launch(buffer_output=True)
-
-        else:
-            return super(JSController, self).launch(buffer_output=buffer_output)
-
-    def wait(self, *pargs, **kwargs):
-        """Wait for the JSController to finish"""
-        ret = super(JSController, self).wait(*pargs, **kwargs)
-        # If this is a SlimerJS controller, check the captured stdout for
-        # errors.  Otherwise, just return the return code.
-        if self.engine == 'slimerjs':
-            stdout = bytes_to_str(self.stdout)
-            if self.display_slimer_output:
-                print(stdout)
-            if ret != 0:
-                # This could still happen e.g. if it's stopped by SIGINT
-                return ret
-            return bool(self.slimer_failure.search(strip_ansi(stdout)))
-        else:
-            return ret
-
-    def print_extra_info(self):
-        print("Running tests with notebook directory %r" % self.nbdir.name)
-
-    @property
-    def will_run(self):
-        return all(have[a] for a in self.requirements + [self.engine])
-
-    def _init_server(self):
-        "Start the notebook server in a separate process"
-        self.server_command = command = [sys.executable,
-            '-m', 'IPython.html',
-            '--no-browser',
-            '--ipython-dir', self.ipydir.name,
-            '--notebook-dir', self.nbdir.name,
-        ]
-        # ipc doesn't work on Windows, and darwin has crazy-long temp paths,
-        # which run afoul of ipc's maximum path length.
-        if sys.platform.startswith('linux'):
-            command.append('--KernelManager.transport=ipc')
-        self.stream_capturer = c = StreamCapturer()
-        c.start()
-        self.server = subprocess.Popen(command, stdout=c.writefd, stderr=subprocess.STDOUT)
-        self.server_info_file = os.path.join(self.ipydir.name,
-            'profile_default', 'security', 'nbserver-%i.json' % self.server.pid
-        )
-        self._wait_for_server()
-    
-    def _wait_for_server(self):
-        """Wait 30 seconds for the notebook server to start"""
-        for i in range(300):
-            if self.server.poll() is not None:
-                return self._failed_to_start()
-            if os.path.exists(self.server_info_file):
-                try:
-                    self._load_server_info()
-                except ValueError:
-                    # If the server is halfway through writing the file, we may
-                    # get invalid JSON; it should be ready next iteration.
-                    pass
-                else:
-                    return
-            time.sleep(0.1)
-        print("Notebook server-info file never arrived: %s" % self.server_info_file,
-            file=sys.stderr
-        )
-    
-    def _failed_to_start(self):
-        """Notebook server exited prematurely"""
-        captured = self.stream_capturer.get_buffer().decode('utf-8', 'replace')
-        print("Notebook failed to start: ", file=sys.stderr)
-        print(self.server_command)
-        print(captured, file=sys.stderr)
-    
-    def _load_server_info(self):
-        """Notebook server started, load connection info from JSON"""
-        with open(self.server_info_file) as f:
-            info = json.load(f)
-        self.server_port = info['port']
-
-    def cleanup(self):
-        try:
-            self.server.terminate()
-        except OSError:
-            # already dead
-            pass
-        # wait 10s for the server to shutdown
-        try:
-            popen_wait(self.server, NOTEBOOK_SHUTDOWN_TIMEOUT)
-        except TimeoutExpired:
-            # server didn't terminate, kill it
-            try:
-                print("Failed to terminate notebook server, killing it.",
-                    file=sys.stderr
-                )
-                self.server.kill()
-            except OSError:
-                # already dead
-                pass
-        # wait another 10s
-        try:
-            popen_wait(self.server, NOTEBOOK_SHUTDOWN_TIMEOUT)
-        except TimeoutExpired:
-            print("Notebook server still running (%s)" % self.server_info_file,
-                file=sys.stderr
-            )
-            
-        self.stream_capturer.halt()
-        TestController.cleanup(self)
-
-
 def prepare_controllers(options):
     """Returns two lists of TestController instances, those to run, and those
     not to run."""
     testgroups = options.testgroups
-    if testgroups:
-        if 'js' in testgroups:
-            js_testgroups = all_js_groups()
-        else:
-            js_testgroups = [g for g in testgroups if g.startswith(js_prefix)]
-        
-        py_testgroups = [g for g in testgroups if g not in ['js'] + js_testgroups]
-    else:
-        py_testgroups = py_test_group_names
-        if not options.all:
-            js_testgroups = []
-            test_sections['parallel'].enabled = False
-        else:
-            js_testgroups = all_js_groups()
+    if not testgroups:
+        testgroups = py_test_group_names
 
-    engine = 'slimerjs' if options.slimerjs else 'phantomjs'
-    c_js = [JSController(name, xunit=options.xunit, engine=engine) for name in js_testgroups]
-    c_py = [PyTestController(name, options) for name in py_testgroups]
+    controllers = [PyTestController(name, options) for name in testgroups]
 
-    controllers = c_py + c_js
     to_run = [c for c in controllers if c.will_run]
     not_run = [c for c in controllers if not c.will_run]
     return to_run, not_run
@@ -495,11 +344,10 @@ def run_iptestall(options):
       is passed, one process is used per CPU core. Default 1 (i.e. sequential)
 
     inc_slow : bool
-      Include slow tests, like IPython.parallel. By default, these tests aren't
-      run.
+      Include slow tests. By default, these tests aren't run.
 
-    slimerjs : bool
-      Use slimerjs if it's installed instead of phantomjs for casperjs tests.
+    url : unicode
+      Address:port to use when running the JS tests.
 
     xunit : bool
       Produce Xunit XML output. This is written to multiple foo.xunit.xml files.
@@ -580,7 +428,7 @@ def run_iptestall(options):
         print()
 
     if options.coverage:
-        from coverage import coverage
+        from coverage import coverage, CoverageException
         cov = coverage(data_file='.coverage')
         cov.combine()
         cov.save()
@@ -605,7 +453,7 @@ def run_iptestall(options):
                         cu.name = '.'.join(nameparts[ix:])
 
             # Reimplement the html_report method with our custom reporter
-            cov._harvest_data()
+            cov.get_data()
             cov.config.from_args(omit='*{0}tests{0}*'.format(os.sep), html_dir=html_dir,
                                  html_title='IPython test coverage',
                                 )
@@ -615,7 +463,12 @@ def run_iptestall(options):
 
         # Coverage XML report
         elif options.coverage == 'xml':
-            cov.xml_report(outfile='ipy_coverage.xml')
+            try:
+                cov.xml_report(outfile='ipy_coverage.xml')
+            except CoverageException as e:
+                print('Generating coverage report failed. Are you running javascript tests only?')
+                import traceback
+                traceback.print_exc()
 
     if failed:
         # Ensure that our exit code indicates failure
@@ -627,8 +480,7 @@ argparser.add_argument('testgroups', nargs='*',
                     'all tests.')
 argparser.add_argument('--all', action='store_true',
                     help='Include slow tests not run by default.')
-argparser.add_argument('--slimerjs', action='store_true',
-                    help="Use slimerjs if it's installed instead of phantomjs for casperjs tests.")
+argparser.add_argument('--url', help="URL to use for the JS tests.")
 argparser.add_argument('-j', '--fast', nargs='?', const=None, default=1, type=int,
                     help='Run test sections in parallel. This starts as many '
                     'processes as you have cores, or you can specify a number.')

@@ -32,14 +32,16 @@ from IPython.core import page
 from IPython.lib.pretty import pretty
 from IPython.testing.skipdoctest import skip_doctest_py3
 from IPython.utils import PyColorize
-from IPython.utils import io
 from IPython.utils import openpy
 from IPython.utils import py3compat
 from IPython.utils.dir2 import safe_hasattr
+from IPython.utils.path import compress_user
 from IPython.utils.text import indent
 from IPython.utils.wildcard import list_namespace
 from IPython.utils.coloransi import TermColors, ColorScheme, ColorSchemeTable
 from IPython.utils.py3compat import cast_unicode, string_types, PY3
+from IPython.utils.signatures import signature
+from IPython.utils.colorable import Colorable
 
 # builtin docstrings to ignore
 _func_call_docstring = types.FunctionType.__call__.__doc__
@@ -56,28 +58,7 @@ _builtin_meth_type = type(str.upper)  # Bound methods have the same type as buil
 
 Colors = TermColors  # just a shorthand
 
-# Build a few color schemes
-NoColor = ColorScheme(
-    'NoColor',{
-    'header' : Colors.NoColor,
-    'normal' : Colors.NoColor  # color off (usu. Colors.Normal)
-    }  )
-
-LinuxColors = ColorScheme(
-    'Linux',{
-    'header' : Colors.LightRed,
-    'normal' : Colors.Normal  # color off (usu. Colors.Normal)
-    } )
-
-LightBGColors = ColorScheme(
-    'LightBG',{
-    'header' : Colors.Red,
-    'normal' : Colors.Normal  # color off (usu. Colors.Normal)
-    }  )
-
-# Build table of color schemes (needed by the parser)
-InspectColors = ColorSchemeTable([NoColor,LinuxColors,LightBGColors],
-                                 'Linux')
+InspectColors = PyColorize.ANSICodeColors
 
 #****************************************************************************
 # Auxiliary functions and objects
@@ -199,10 +180,7 @@ def getsource(obj, oname=''):
     else:
         # Get source for non-property objects.
 
-        # '__wrapped__' attribute is used by some decorators (e.g. ones defined
-        # functools) to provide access to the decorated function.
-        if hasattr(obj, "__wrapped__"):
-            obj = obj.__wrapped__
+        obj = _get_wrapped(obj)
 
         try:
             src = inspect.getsource(obj)
@@ -301,6 +279,24 @@ def call_tip(oinfo, format_call=True):
     return call_line, doc
 
 
+def _get_wrapped(obj):
+    """Get the original object if wrapped in one or more @decorators
+
+    Some objects automatically construct similar objects on any unrecognised
+    attribute access (e.g. unittest.mock.call). To protect against infinite loops,
+    this will arbitrarily cut off after 100 levels of obj.__wrapped__
+    attribute access. --TK, Jan 2016
+    """
+    orig_obj = obj
+    i = 0
+    while safe_hasattr(obj, '__wrapped__'):
+        obj = obj.__wrapped__
+        i += 1
+        if i > 100:
+            # __wrapped__ is probably a lie, so return the thing we started with
+            return orig_obj
+    return obj
+
 def find_file(obj):
     """Find the absolute path to the file where an object was defined.
 
@@ -317,9 +313,7 @@ def find_file(obj):
     fname : str
       The absolute path to the file where the object was defined.
     """
-    # get source if obj was decorated with @decorator
-    if safe_hasattr(obj, '__wrapped__'):
-        obj = obj.__wrapped__
+    obj = _get_wrapped(obj)
 
     fname = None
     try:
@@ -354,9 +348,7 @@ def find_source_lines(obj):
     lineno : int
       The line number where the object definition starts.
     """
-    # get source if obj was decorated with @decorator
-    if safe_hasattr(obj, '__wrapped__'):
-        obj = obj.__wrapped__
+    obj = _get_wrapped(obj)
     
     try:
         try:
@@ -373,13 +365,15 @@ def find_source_lines(obj):
     return lineno
 
 
-class Inspector:
+class Inspector(Colorable):
     def __init__(self, color_table=InspectColors,
                  code_color_table=PyColorize.ANSICodeColors,
                  scheme='NoColor',
-                 str_detail_level=0):
+                 str_detail_level=0, 
+                 parent=None, config=None):
+        super(Inspector, self).__init__(parent=parent, config=config)
         self.color_table = color_table
-        self.parser = PyColorize.Parser(code_color_table,out='str')
+        self.parser = PyColorize.Parser(out='str', parent=self, style=scheme)
         self.format = self.parser.format
         self.str_detail_level = str_detail_level
         self.set_active_scheme(scheme)
@@ -390,7 +384,7 @@ class Inspector:
         If any exception is generated, None is returned instead and the
         exception is suppressed."""
         try:
-            hdef = oname + inspect.formatargspec(*getargspec(obj))
+            hdef = oname + str(signature(obj))
             return cast_unicode(hdef)
         except:
             return None
@@ -425,7 +419,6 @@ class Inspector:
 
         if inspect.isclass(obj):
             header = self.__head('Class constructor information:\n')
-            obj = obj.__init__
         elif (not py3compat.PY3) and type(obj) is types.InstanceType:
             obj = obj.__call__
 
@@ -433,7 +426,7 @@ class Inspector:
         if output is None:
             self.noinfo('definition header',oname)
         else:
-            print(header,self.format(output), end=' ', file=io.stdout)
+            print(header,self.format(output), end=' ')
 
     # In Python 3, all classes are new-style, so they all have __init__.
     @skip_doctest_py3
@@ -553,23 +546,6 @@ class Inspector:
                 title = header((title+":").ljust(title_width))
             out.append(cast_unicode(title) + cast_unicode(content))
         return "\n".join(out)
-
-    # The fields to be displayed by pinfo: (fancy_name, key_in_info_dict)
-    pinfo_fields1 = [("Type", "type_name"),
-                    ]
-                    
-    pinfo_fields2 = [("String form", "string_form"),
-                    ]
-
-    pinfo_fields3 = [("Length", "length"),
-                    ("File", "file"),
-                    ("Definition", "definition"),
-                    ]
-
-    pinfo_fields_obj = [("Class docstring", "class_docstring"),
-                        ("Init docstring", "init_docstring"),
-                        ("Call def", "call_def"),
-                        ("Call docstring", "call_docstring")]
     
     def _format_info(self, obj, oname='', formatter=None, info=None, detail_level=0):
         """Format an info dict as text"""
@@ -580,42 +556,70 @@ class Inspector:
             for title, key in fields:
                 field = info[key]
                 if field is not None:
-                    displayfields.append((title, field.rstrip()))
-        
-        add_fields(self.pinfo_fields1)
-        
-        # Base class for old-style instances
-        if (not py3compat.PY3) and isinstance(obj, types.InstanceType) and info['base_class']:
-            displayfields.append(("Base Class", info['base_class'].rstrip()))
-        
-        add_fields(self.pinfo_fields2)
-        
-        # Namespace
-        if info['namespace'] != 'Interactive':
-            displayfields.append(("Namespace", info['namespace'].rstrip()))
+                    if key == "source":
+                        displayfields.append((title, self.format(cast_unicode(field.rstrip()))))
+                    else:
+                        displayfields.append((title, field.rstrip()))
 
-        add_fields(self.pinfo_fields3)
-        if info['isclass'] and info['init_definition']:
-            displayfields.append(("Init definition",
-                            info['init_definition'].rstrip()))
-        
-        # Source or docstring, depending on detail level and whether
-        # source found.
-        if detail_level > 0 and info['source'] is not None:
-            displayfields.append(("Source", 
-                                  self.format(cast_unicode(info['source']))))
-        elif info['docstring'] is not None:
-            displayfields.append(("Docstring", info["docstring"]))
+        if info['isalias']:
+            add_fields([('Repr', "string_form")])
 
-        # Constructor info for classes
-        if info['isclass']:
-            if info['init_docstring'] is not None:
-                displayfields.append(("Init docstring",
-                                    info['init_docstring']))
+        elif info['ismagic']:
+            if detail_level > 0 and info['source'] is not None:
+                add_fields([("Source", "source")])
+            else:
+                add_fields([("Docstring", "docstring")])
 
-        # Info for objects:
+            add_fields([("File", "file"),
+                       ])
+
+        elif info['isclass'] or is_simple_callable(obj):
+            # Functions, methods, classes
+            add_fields([("Signature", "definition"),
+                        ("Init signature", "init_definition"),
+                       ])
+            if detail_level > 0 and info['source'] is not None:
+                add_fields([("Source", "source")])
+            else:
+                add_fields([("Docstring", "docstring"),
+                            ("Init docstring", "init_docstring"),
+                           ])
+
+            add_fields([('File', 'file'),
+                        ('Type', 'type_name'),
+                       ])
+
         else:
-            add_fields(self.pinfo_fields_obj)
+            # General Python objects
+            add_fields([("Type", "type_name")])
+
+            # Base class for old-style instances
+            if (not py3compat.PY3) and isinstance(obj, types.InstanceType) and info['base_class']:
+                displayfields.append(("Base Class", info['base_class'].rstrip()))
+
+            add_fields([("String form", "string_form")])
+
+            # Namespace
+            if info['namespace'] != 'Interactive':
+                displayfields.append(("Namespace", info['namespace'].rstrip()))
+
+            add_fields([("Length", "length"),
+                        ("File", "file"),
+                        ("Signature", "definition"),
+                       ])
+
+            # Source or docstring, depending on detail level and whether
+            # source found.
+            if detail_level > 0 and info['source'] is not None:
+                displayfields.append(("Source",
+                                      self.format(cast_unicode(info['source']))))
+            elif info['docstring'] is not None:
+                displayfields.append(("Docstring", info["docstring"]))
+
+            add_fields([("Class docstring", "class_docstring"),
+                        ("Init docstring", "init_docstring"),
+                        ("Call signature", "call_def"),
+                        ("Call docstring", "call_docstring")])
         
         if displayfields:
             return self._format_fields(displayfields)
@@ -736,7 +740,7 @@ class Inspector:
                 binary_file = True
             elif fname.endswith('<string>'):
                 fname = 'Dynamically generated function. No source code available.'
-            out['file'] = fname
+            out['file'] = compress_user(fname)
 
         # Original source code for a callable, class or property.
         if detail_level:
@@ -760,23 +764,29 @@ class Inspector:
         # Constructor docstring for classes
         if inspect.isclass(obj):
             out['isclass'] = True
-            # reconstruct the function definition and print it:
+
+            # get the init signature:
             try:
-                obj_init =  obj.__init__
+                init_def = self._getdef(obj, oname)
             except AttributeError:
-                init_def = init_ds = None
+                init_def = None
+
+            if init_def:
+                out['init_definition'] = self.format(init_def)
+
+            # get the __init__ docstring
+            try:
+                obj_init = obj.__init__
+            except AttributeError:
+                init_ds = None
             else:
-                init_def = self._getdef(obj_init,oname)
-                init_ds  = getdoc(obj_init)
+                init_ds = getdoc(obj_init)
                 # Skip Python's auto-generated docstrings
                 if init_ds == _object_init_docstring:
                     init_ds = None
 
-            if init_def or init_ds:
-                if init_def:
-                    out['init_definition'] = self.format(init_def)
-                if init_ds:
-                    out['init_docstring'] = init_ds
+            if init_ds:
+                out['init_docstring'] = init_ds
 
         # and class docstring for instances:
         else:
@@ -841,7 +851,7 @@ class Inspector:
         else:
             callable_obj = None
 
-        if callable_obj:
+        if callable_obj is not None:
             try:
                 argspec = getargspec(callable_obj)
             except (TypeError, AttributeError):

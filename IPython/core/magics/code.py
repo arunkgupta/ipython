@@ -1,6 +1,7 @@
 """Implementation of code management magic functions.
 """
 from __future__ import print_function
+from __future__ import absolute_import
 #-----------------------------------------------------------------------------
 #  Copyright (c) 2012 The IPython Development Team.
 #
@@ -32,7 +33,8 @@ from IPython.utils import py3compat
 from IPython.utils.py3compat import string_types
 from IPython.utils.contexts import preserve_keys
 from IPython.utils.path import get_py_filename, unquote_filename
-from IPython.utils.warn import warn, error
+from warnings import warn
+from logging import error
 from IPython.utils.text import get_text_list
 
 #-----------------------------------------------------------------------------
@@ -146,6 +148,10 @@ class InteractivelyDefined(Exception):
 @magics_class
 class CodeMagics(Magics):
     """Magics related to code management (loading, saving, editing, ...)."""
+
+    def __init__(self, *args, **kwargs):
+        self._knowntemps = set()
+        super(CodeMagics, self).__init__(*args, **kwargs)
 
     @line_magic
     def save(self, parameter_s=''):
@@ -353,7 +359,9 @@ class CodeMagics(Magics):
                 print('Operation cancelled.')
                 return
 
-        self.shell.set_next_input(contents)
+        contents = "# %load {}\n".format(arg_s) + contents
+
+        self.shell.set_next_input(contents, replace=True)
 
     @staticmethod
     def _find_edit_target(shell, args, opts, last_call):
@@ -658,6 +666,12 @@ class CodeMagics(Magics):
             # nothing was found, warnings have already been issued,
             # just give up.
             return
+
+        if is_temp:
+            self._knowntemps.add(filename)
+        elif (filename in self._knowntemps):
+            is_temp = True
+
 
         # do actual editing here
         print('Editing...', end=' ')

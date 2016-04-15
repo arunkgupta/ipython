@@ -5,14 +5,11 @@ Needs to be run by nose (to make ipython session available).
 """
 from __future__ import absolute_import
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
-
 import io
 import os
 import sys
-from unittest import TestCase, skipIf
+import warnings
+from unittest import TestCase
 
 try:
     from importlib import invalidate_caches   # Required from Python 3.3
@@ -22,11 +19,12 @@ except ImportError:
 
 import nose.tools as nt
 
+from IPython import get_ipython
 from IPython.core import magic
+from IPython.core.error import UsageError
 from IPython.core.magic import (Magics, magics_class, line_magic,
-                                cell_magic, line_cell_magic,
-                                register_line_magic, register_cell_magic,
-                                register_line_cell_magic)
+                                cell_magic,
+                                register_line_magic, register_cell_magic)
 from IPython.core.magics import execution, script, code
 from IPython.testing import decorators as dec
 from IPython.testing import tools as tt
@@ -40,9 +38,6 @@ if py3compat.PY3:
 else:
     from StringIO import StringIO
 
-#-----------------------------------------------------------------------------
-# Test functions begin
-#-----------------------------------------------------------------------------
 
 @magic.magics_class
 class DummyMagics(magic.Magics): pass
@@ -572,6 +567,11 @@ def test_timeit_quiet():
     with tt.AssertNotPrints("loops"):
         _ip.run_cell("%timeit -n1 -r1 -q 1")
 
+def test_timeit_return_quiet():
+    with tt.AssertNotPrints("loops"):
+        res = _ip.run_line_magic('timeit', '-n1 -r1 -q -o 1')
+    assert (res is not None)
+
 @dec.skipif(sys.version_info[0] >= 3, "no differences with __future__ in py3")
 def test_timeit_futures():
     "Test %timeit with __future__ environments"
@@ -605,13 +605,16 @@ def test_prun_quotes():
     nt.assert_equal(_ip.user_ns['x'], '\t')
 
 def test_extension():
-    tmpdir = TemporaryDirectory()
-    orig_ipython_dir = _ip.ipython_dir
+    # Debugging information for failures of this test
+    print('sys.path:')
+    for p in sys.path:
+        print(' ', p)
+    print('CWD', os.getcwd())
+
+    nt.assert_raises(ImportError, _ip.magic, "load_ext daft_extension")
+    daft_path = os.path.join(os.path.dirname(__file__), "daft_extension")
+    sys.path.insert(0, daft_path)
     try:
-        _ip.ipython_dir = tmpdir.name
-        nt.assert_raises(ImportError, _ip.magic, "load_ext daft_extension")
-        url = os.path.join(os.path.dirname(__file__), "daft_extension.py")
-        _ip.magic("install_ext %s" % url)
         _ip.user_ns.pop('arq', None)
         invalidate_caches()   # Clear import caches
         _ip.magic("load_ext daft_extension")
@@ -619,52 +622,50 @@ def test_extension():
         _ip.magic("unload_ext daft_extension")
         assert 'arq' not in _ip.user_ns
     finally:
-        _ip.ipython_dir = orig_ipython_dir
-        tmpdir.cleanup()
+        sys.path.remove(daft_path)
 
 
-# The nose skip decorator doesn't work on classes, so this uses unittest's skipIf
-@skipIf(dec.module_not_available('IPython.nbformat.current'), 'nbformat not importable')
-class NotebookExportMagicTests(TestCase):
-    def test_notebook_export_json(self):
-        with TemporaryDirectory() as td:
-            outfile = os.path.join(td, "nb.ipynb")
-            _ip.ex(py3compat.u_format(u"u = {u}'héllo'"))
-            _ip.magic("notebook -e %s" % outfile)
-
-    def test_notebook_export_py(self):
-        with TemporaryDirectory() as td:
-            outfile = os.path.join(td, "nb.py")
-            _ip.ex(py3compat.u_format(u"u = {u}'héllo'"))
-            _ip.magic("notebook -e %s" % outfile)
-
-    def test_notebook_reformat_py(self):
-        from IPython.nbformat.v3.tests.nbexamples import nb0
-        from IPython.nbformat import current
-        with TemporaryDirectory() as td:
-            infile = os.path.join(td, "nb.ipynb")
-            with io.open(infile, 'w', encoding='utf-8') as f:
-                current.write(nb0, f, 'json')
-
-            _ip.ex(py3compat.u_format(u"u = {u}'héllo'"))
-            _ip.magic("notebook -f py %s" % infile)
-
-    def test_notebook_reformat_json(self):
-        from IPython.nbformat.v3.tests.nbexamples import nb0
-        from IPython.nbformat import current
-        with TemporaryDirectory() as td:
-            infile = os.path.join(td, "nb.py")
-            with io.open(infile, 'w', encoding='utf-8') as f:
-                current.write(nb0, f, 'py')
-
-            _ip.ex(py3compat.u_format(u"u = {u}'héllo'"))
-            _ip.magic("notebook -f ipynb %s" % infile)
-            _ip.magic("notebook -f json %s" % infile)
+@dec.skip_without('nbformat')
+def test_notebook_export_json():
+    _ip = get_ipython()
+    _ip.history_manager.reset()   # Clear any existing history.
+    cmds = [u"a=1", u"def b():\n  return a**2", u"print('noël, été', b())"]
+    for i, cmd in enumerate(cmds, start=1):
+        _ip.history_manager.store_inputs(i, cmd)
+    with TemporaryDirectory() as td:
+        outfile = os.path.join(td, "nb.ipynb")
+        _ip.magic("notebook -e %s" % outfile)
 
 
-def test_env():
-    env = _ip.magic("env")
-    assert isinstance(env, dict), type(env)
+class TestEnv(TestCase):
+
+    def test_env(self):
+        env = _ip.magic("env")
+        self.assertTrue(isinstance(env, dict))
+
+    def test_env_get_set_simple(self):
+        env = _ip.magic("env var val1")
+        self.assertEqual(env, None)
+        self.assertEqual(os.environ['var'], 'val1')
+        self.assertEqual(_ip.magic("env var"), 'val1')
+        env = _ip.magic("env var=val2")
+        self.assertEqual(env, None)
+        self.assertEqual(os.environ['var'], 'val2')
+
+    def test_env_get_set_complex(self):
+        env = _ip.magic("env var 'val1 '' 'val2")
+        self.assertEqual(env, None)
+        self.assertEqual(os.environ['var'], "'val1 '' 'val2")
+        self.assertEqual(_ip.magic("env var"), "'val1 '' 'val2")
+        env = _ip.magic('env var=val2 val3="val4')
+        self.assertEqual(env, None)
+        self.assertEqual(os.environ['var'], 'val2 val3="val4')
+
+    def test_env_set_bad_input(self):
+        self.assertRaises(UsageError, lambda: _ip.magic("set_env var"))
+
+    def test_env_set_whitespace(self):
+        self.assertRaises(UsageError, lambda: _ip.magic("env var A=B"))
 
 
 class CellMagicTestCase(TestCase):
@@ -989,3 +990,13 @@ def test_bookmark():
     with tt.AssertPrints('bmname'):
         ip.run_line_magic('bookmark', '-l')
     ip.run_line_magic('bookmark', '-d bmname')
+
+def test_ls_magic():
+    ip = get_ipython()
+    json_formatter = ip.display_formatter.formatters['application/json']
+    json_formatter.enabled = True
+    lsmagic = ip.magic('lsmagic')
+    with warnings.catch_warnings(record=True) as w:
+        j = json_formatter(lsmagic)
+    nt.assert_equal(sorted(j), ['cell', 'line'])
+    nt.assert_equal(w, []) # no warnings

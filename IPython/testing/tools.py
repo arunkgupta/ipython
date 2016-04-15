@@ -36,7 +36,7 @@ try:
 except ImportError:
     has_nose = False
 
-from IPython.config.loader import Config
+from traitlets.config.loader import Config
 from IPython.utils.process import get_output_error_code
 from IPython.utils.text import list_strings
 from IPython.utils.io import temp_pyfile, Tee
@@ -177,7 +177,7 @@ def get_ipython_cmd(as_string=False):
 
     return ipython_cmd
 
-def ipexec(fname, options=None):
+def ipexec(fname, options=None, commands=()):
     """Utility to call 'ipython filename'.
 
     Starts IPython with a minimal and safe configuration to make startup as fast
@@ -192,6 +192,9 @@ def ipexec(fname, options=None):
 
     options : optional, list
       Extra command-line flags to be passed to IPython.
+
+    commands : optional, list
+      Commands to send in on stdin
 
     Returns
     -------
@@ -214,9 +217,17 @@ def ipexec(fname, options=None):
     full_fname = os.path.join(test_dir, fname)
     full_cmd = ipython_cmd + cmdargs + [full_fname]
     env = os.environ.copy()
-    env.pop('PYTHONWARNINGS', None)  # Avoid extraneous warnings appearing on stderr
-    p = Popen(full_cmd, stdout=PIPE, stderr=PIPE, env=env)
-    out, err = p.communicate()
+    # FIXME: ignore all warnings in ipexec while we have shims
+    # should we keep suppressing warnings here, even after removing shims?
+    env['PYTHONWARNINGS'] = 'ignore'
+    # env.pop('PYTHONWARNINGS', None)  # Avoid extraneous warnings appearing on stderr
+    for k, v in env.items():
+        # Debug a bizarre failure we've seen on Windows:
+        # TypeError: environment can only contain strings
+        if not isinstance(v, str):
+            print(k, v)
+    p = Popen(full_cmd, stdout=PIPE, stderr=PIPE, stdin=PIPE, env=env)
+    out, err = p.communicate(input=py3compat.str_to_bytes('\n'.join(commands)) or None)
     out, err = py3compat.bytes_to_str(out), py3compat.bytes_to_str(err)
     # `import readline` causes 'ESC[?1034h' to be output sometimes,
     # so strip that out before doing comparisons
@@ -226,7 +237,7 @@ def ipexec(fname, options=None):
 
 
 def ipexec_validate(fname, expected_out, expected_err='',
-                    options=None):
+                    options=None, commands=()):
     """Utility to call 'ipython filename' and validate output/error.
 
     This function raises an AssertionError if the validation fails.
@@ -254,7 +265,7 @@ def ipexec_validate(fname, expected_out, expected_err='',
 
     import nose.tools as nt
 
-    out, err = ipexec(fname, options)
+    out, err = ipexec(fname, options, commands)
     #print 'OUT', out  # dbg
     #print 'ERR', err  # dbg
     # If there are any errors, we must check those befor stdout, as they may be
@@ -365,18 +376,21 @@ class AssertPrints(object):
         setattr(sys, self.channel, self.buffer if self.suppress else self.tee)
     
     def __exit__(self, etype, value, traceback):
-        if value is not None:
-            # If an error was raised, don't check anything else
+        try:
+            if value is not None:
+                # If an error was raised, don't check anything else
+                return False
+            self.tee.flush()
+            setattr(sys, self.channel, self.orig_stream)
+            printed = self.buffer.getvalue()
+            for s in self.s:
+                if isinstance(s, _re_type):
+                    assert s.search(printed), notprinted_msg.format(s.pattern, self.channel, printed)
+                else:
+                    assert s in printed, notprinted_msg.format(s, self.channel, printed)
             return False
-        self.tee.flush()
-        setattr(sys, self.channel, self.orig_stream)
-        printed = self.buffer.getvalue()
-        for s in self.s:
-            if isinstance(s, _re_type):
-                assert s.search(printed), notprinted_msg.format(s.pattern, self.channel, printed)
-            else:
-                assert s in printed, notprinted_msg.format(s, self.channel, printed)
-        return False
+        finally:
+            self.tee.close()
 
 printed_msg = """Found {0!r} in printed output (on {1}):
 -------
@@ -389,18 +403,24 @@ class AssertNotPrints(AssertPrints):
     
     Counterpart of AssertPrints"""
     def __exit__(self, etype, value, traceback):
-        if value is not None:
-            # If an error was raised, don't check anything else
+        try:
+            if value is not None:
+                # If an error was raised, don't check anything else
+                self.tee.close()
+                return False
+            self.tee.flush()
+            setattr(sys, self.channel, self.orig_stream)
+            printed = self.buffer.getvalue()
+            for s in self.s:
+                if isinstance(s, _re_type):
+                    assert not s.search(printed),printed_msg.format(
+                        s.pattern, self.channel, printed)
+                else:
+                    assert s not in printed, printed_msg.format(
+                        s, self.channel, printed)
             return False
-        self.tee.flush()
-        setattr(sys, self.channel, self.orig_stream)
-        printed = self.buffer.getvalue()
-        for s in self.s:
-            if isinstance(s, _re_type):
-                assert not s.search(printed), printed_msg.format(s.pattern, self.channel, printed)
-            else:
-                assert s not in printed, printed_msg.format(s, self.channel, printed)
-        return False
+        finally:
+            self.tee.close()
 
 @contextmanager
 def mute_warn():
@@ -422,17 +442,6 @@ def make_tempfile(name):
         yield
     finally:
         os.unlink(name)
-
-
-@contextmanager
-def monkeypatch(obj, name, attr):
-    """
-    Context manager to replace attribute named `name` in `obj` with `attr`.
-    """
-    orig = getattr(obj, name)
-    setattr(obj, name, attr)
-    yield
-    setattr(obj, name, orig)
 
 
 def help_output_test(subcommand=''):

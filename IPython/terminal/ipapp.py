@@ -3,25 +3,10 @@
 """
 The :class:`~IPython.core.application.Application` object for the command
 line :command:`ipython` program.
-
-Authors
--------
-
-* Brian Granger
-* Fernando Perez
-* Min Ragan-Kelley
 """
 
-#-----------------------------------------------------------------------------
-#  Copyright (C) 2008-2011  The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
-
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
 from __future__ import absolute_import
 from __future__ import print_function
@@ -30,8 +15,8 @@ import logging
 import os
 import sys
 
-from IPython.config.loader import Config
-from IPython.config.application import boolean_flag, catch_config_error, Application
+from traitlets.config.loader import Config
+from traitlets.config.application import boolean_flag, catch_config_error, Application
 from IPython.core import release
 from IPython.core import usage
 from IPython.core.completer import IPCompleter
@@ -47,10 +32,10 @@ from IPython.core.shellapp import (
     InteractiveShellApp, shell_flags, shell_aliases
 )
 from IPython.extensions.storemagic import StoreMagics
-from IPython.terminal.interactiveshell import TerminalInteractiveShell
+from .ptshell import TerminalInteractiveShell
 from IPython.utils import warn
-from IPython.utils.path import get_ipython_dir, check_for_old_config
-from IPython.utils.traitlets import (
+from IPython.paths import get_ipython_dir
+from traitlets import (
     Bool, List, Dict,
 )
 
@@ -65,22 +50,11 @@ ipython --matplotlib=qt    # enable matplotlib integration with qt4 backend
 ipython --log-level=DEBUG  # set logging to DEBUG
 ipython --profile=foo      # start with profile foo
 
-ipython qtconsole          # start the qtconsole GUI application
-ipython help qtconsole     # show the help for the qtconsole subcmd
-
-ipython console            # start the terminal-based console application
-ipython help console       # show the help for the console subcmd
-
-ipython notebook           # start the IPython notebook
-ipython help notebook      # show the help for the notebook subcmd
-
 ipython profile create foo # create profile foo w/ default config files
 ipython help profile       # show the help for the profile subcmd
 
 ipython locate             # print the path to the IPython directory
 ipython locate profile foo # print the path to the directory for profile `foo`
-
-ipython nbconvert           # convert notebooks to/from other formats
 """
 
 #-----------------------------------------------------------------------------
@@ -172,7 +146,9 @@ frontend_flags['quick']=(
 frontend_flags['i'] = (
     {'TerminalIPythonApp' : {'force_interact' : True}},
     """If running code from the command line, become interactive afterwards.
-    Note: can also be given simply as '-i'."""
+    It is often useful to follow this with `--` to treat remaining flags as
+    script arguments.
+    """
 )
 flags.update(frontend_flags)
 
@@ -222,21 +198,32 @@ class TerminalIPythonApp(BaseIPythonApplication, InteractiveShellApp):
             StoreMagics,
         ]
 
+    deprecated_subcommands = dict(
+        qtconsole=('qtconsole.qtconsoleapp.JupyterQtConsoleApp',
+            """DEPRECATED, Will be removed in IPython 6.0 : Launch the Jupyter Qt Console."""
+        ),
+        notebook=('notebook.notebookapp.NotebookApp',
+            """DEPRECATED, Will be removed in IPython 6.0 : Launch the Jupyter HTML Notebook Server."""
+        ),
+        console=('jupyter_console.app.ZMQTerminalIPythonApp',
+            """DEPRECATED, Will be removed in IPython 6.0 : Launch the Jupyter terminal-based Console."""
+        ),
+        nbconvert=('nbconvert.nbconvertapp.NbConvertApp',
+            "DEPRECATED, Will be removed in IPython 6.0 : Convert notebooks to/from other formats."
+        ),
+        trust=('nbformat.sign.TrustNotebookApp',
+            "DEPRECATED, Will be removed in IPython 6.0 : Sign notebooks to trust their potentially unsafe contents at load."
+        ),
+        kernelspec=('jupyter_client.kernelspecapp.KernelSpecApp',
+            "DEPRECATED, Will be removed in IPython 6.0 : Manage Jupyter kernel specifications."
+        ),
+    )
     subcommands = dict(
-        qtconsole=('IPython.qt.console.qtconsoleapp.IPythonQtConsoleApp',
-            """Launch the IPython Qt Console."""
-        ),
-        notebook=('IPython.html.notebookapp.NotebookApp',
-            """Launch the IPython HTML Notebook Server."""
-        ),
         profile = ("IPython.core.profileapp.ProfileApp",
             "Create and manage IPython profiles."
         ),
-        kernel = ("IPython.kernel.zmq.kernelapp.IPKernelApp",
+        kernel = ("ipykernel.kernelapp.IPKernelApp",
             "Start a kernel without an attached frontend."
-        ),
-        console=('IPython.terminal.console.app.ZMQTerminalIPythonApp',
-            """Launch the IPython terminal-based Console."""
         ),
         locate=('IPython.terminal.ipapp.LocateIPythonApp',
             LocateIPythonApp.description
@@ -244,34 +231,22 @@ class TerminalIPythonApp(BaseIPythonApplication, InteractiveShellApp):
         history=('IPython.core.historyapp.HistoryApp',
             "Manage the IPython history database."
         ),
-        nbconvert=('IPython.nbconvert.nbconvertapp.NbConvertApp',
-            "Convert notebooks to/from other formats."
-        ),
-        trust=('IPython.nbformat.sign.TrustNotebookApp',
-            "Sign notebooks to trust their potentially unsafe contents at load."
-        ),
-        kernelspec=('IPython.kernel.kernelspecapp.KernelSpecApp',
-            "Manage IPython kernel specifications."
-        ),
     )
-    subcommands['install-nbextension'] = (
-        "IPython.html.nbextensions.NBExtensionApp",
-        "Install IPython notebook extension files"
+    deprecated_subcommands['install-nbextension'] = (
+        "notebook.nbextensions.InstallNBExtensionApp",
+        "DEPRECATED, Will be removed in IPython 6.0 : Install Jupyter notebook extension files"
     )
+    subcommands.update(deprecated_subcommands)
 
     # *do* autocreate requested profile, but don't create the config file.
     auto_create=Bool(True)
     # configurables
-    ignore_old_config=Bool(False, config=True,
-        help="Suppress warning messages about legacy config files"
-    )
     quick = Bool(False, config=True,
         help="""Start IPython quickly by skipping the loading of config files."""
     )
     def _quick_changed(self, name, old, new):
         if new:
             self.load_config_file = lambda *a, **kw: None
-            self.ignore_old_config=True
 
     display_banner = Bool(True, config=True,
         help="Whether to display a banner upon starting IPython."
@@ -297,7 +272,6 @@ class TerminalIPythonApp(BaseIPythonApplication, InteractiveShellApp):
     _module_to_run_changed = _file_to_run_changed
 
     # internal, not-configurable
-    interact=Bool(True)
     something_to_run=Bool(False)
 
     def parse_command_line(self, argv=None):
@@ -323,8 +297,6 @@ class TerminalIPythonApp(BaseIPythonApplication, InteractiveShellApp):
         if self.subapp is not None:
             # don't bother initializing further, starting subapp
             return
-        if not self.ignore_old_config:
-            check_for_old_config(self.ipython_dir)
         # print self.extra_args
         if self.extra_args and not self.something_to_run:
             self.file_to_run = self.extra_args[0]
@@ -345,7 +317,7 @@ class TerminalIPythonApp(BaseIPythonApplication, InteractiveShellApp):
         # based app, because we call shell.show_banner() by hand below
         # so the banner shows *before* all extension loading stuff.
         self.shell = TerminalInteractiveShell.instance(parent=self,
-                        display_banner=False, profile_dir=self.profile_dir,
+                        profile_dir=self.profile_dir,
                         ipython_dir=self.ipython_dir, user_ns=self.user_ns)
         self.shell.configurables.append(self)
 

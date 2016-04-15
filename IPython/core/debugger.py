@@ -28,12 +28,12 @@ from __future__ import print_function
 
 import bdb
 import functools
-import linecache
+import inspect
 import sys
 
 from IPython import get_ipython
 from IPython.utils import PyColorize, ulinecache
-from IPython.utils import coloransi, io, py3compat
+from IPython.utils import coloransi, py3compat
 from IPython.core.excolors import exception_colors
 from IPython.testing.skipdoctest import skip_doctest
 
@@ -53,7 +53,6 @@ if '--pydb' in sys.argv:
 
 if has_pydb:
     from pydb import Pdb as OldPdb
-    #print "Using pydb for %run -d and post-mortem" #dbg
     prompt = 'ipydb> '
 else:
     from pdb import Pdb as OldPdb
@@ -61,6 +60,16 @@ else:
 # Allow the set_trace code to operate outside of an ipython instance, even if
 # it does so with some limitations.  The rest of this support is implemented in
 # the Tracer constructor.
+
+def make_arrow(pad):
+    """generate the leading arrow in front of traceback or debugger"""
+    if pad >= 2:
+        return '-'*(pad-2) + '> '
+    elif pad == 1:
+        return '>'
+    return ''
+
+
 def BdbQuit_excepthook(et, ev, tb, excepthook=None):
     """Exception hook which handles `BdbQuit` exceptions.
 
@@ -93,7 +102,7 @@ class Tracer(object):
     """
 
     @skip_doctest
-    def __init__(self,colors=None):
+    def __init__(self, colors=None):
         """Create a local debugger instance.
 
         Parameters
@@ -112,7 +121,7 @@ class Tracer(object):
             from IPython.core.debugger import Tracer; debug_here = Tracer()
 
         Later in your code::
-        
+
             debug_here()  # -> will open up the debugger at that point.
 
         Once the debugger activates, you can use all of its regular commands to
@@ -201,15 +210,20 @@ class Pdb(OldPdb):
     """Modified Pdb class, does not load readline."""
 
     def __init__(self,color_scheme='NoColor',completekey=None,
-                 stdin=None, stdout=None):
+                 stdin=None, stdout=None, context=5):
 
         # Parent constructor:
+        try:
+            self.context=int(context)
+            if self.context <= 0:
+                raise ValueError("Context must be a positive integer")
+        except (TypeError, ValueError):
+                raise ValueError("Context must be a positive integer")
+
         if has_pydb and completekey is None:
-            OldPdb.__init__(self,stdin=stdin,stdout=io.stdout)
+            OldPdb.__init__(self,stdin=stdin,stdout=sys.stdout)
         else:
             OldPdb.__init__(self,completekey,stdin,stdout)
-
-        self.prompt = prompt # The default prompt is '(Pdb)'
 
         # IPython changes...
         self.is_pydb = has_pydb
@@ -252,12 +266,15 @@ class Pdb(OldPdb):
         C = coloransi.TermColors
         cst = self.color_scheme_table
 
+        cst['NoColor'].colors.prompt = C.NoColor
         cst['NoColor'].colors.breakpoint_enabled = C.NoColor
         cst['NoColor'].colors.breakpoint_disabled = C.NoColor
 
+        cst['Linux'].colors.prompt = C.Green
         cst['Linux'].colors.breakpoint_enabled = C.LightRed
         cst['Linux'].colors.breakpoint_disabled = C.Red
 
+        cst['LightBG'].colors.prompt = C.Blue
         cst['LightBG'].colors.breakpoint_enabled = C.LightRed
         cst['LightBG'].colors.breakpoint_disabled = C.Red
 
@@ -266,6 +283,15 @@ class Pdb(OldPdb):
         # Add a python parser so we can syntax highlight source while
         # debugging.
         self.parser = PyColorize.Parser()
+
+        # Set the prompt - the default prompt is '(Pdb)'
+        Colors = cst.active_colors
+        if color_scheme == 'NoColor':
+            self.prompt = prompt
+        else:
+            # The colour markers are wrapped by bytes 01 and 02 so that readline
+            # can calculate the width.
+            self.prompt = u'\x01%s\x02%s\x01%s\x02' % (Colors.prompt, prompt, Colors.Normal)
 
     def set_colors(self, scheme):
         """Shorthand access to the color table scheme selector method."""
@@ -276,11 +302,14 @@ class Pdb(OldPdb):
         while True:
             try:
                 OldPdb.interaction(self, frame, traceback)
+                break
             except KeyboardInterrupt:
-                self.shell.write("\nKeyboardInterrupt\n")
+                self.shell.write('\n' + self.shell.get_exception_only())
                 break
-            else:
-                break
+            finally:
+                # Pdb sets readline delimiters, so set them back to our own
+                if self.shell.readline is not None:
+                    self.shell.readline.set_completer_delims(self.shell.readline_delims)
 
     def new_do_up(self, arg):
         OldPdb.do_up(self, arg)
@@ -302,7 +331,6 @@ class Pdb(OldPdb):
         if hasattr(self, 'old_all_completions'):
             self.shell.Completer.all_completions=self.old_all_completions
 
-
         return OldPdb.do_quit(self, arg)
 
     do_q = do_quit = decorate_fn_with_doc(new_do_quit, OldPdb.do_quit)
@@ -316,17 +344,32 @@ class Pdb(OldPdb):
     def postloop(self):
         self.shell.set_completer_frame(None)
 
-    def print_stack_trace(self):
+    def print_stack_trace(self, context=None):
+        if context is None:
+            context = self.context
+        try:
+            context=int(context)
+            if context <= 0:
+                raise ValueError("Context must be a positive integer")
+        except (TypeError, ValueError):
+                raise ValueError("Context must be a positive integer")
         try:
             for frame_lineno in self.stack:
-                self.print_stack_entry(frame_lineno, context = 5)
+                self.print_stack_entry(frame_lineno, context=context)
         except KeyboardInterrupt:
             pass
 
     def print_stack_entry(self,frame_lineno,prompt_prefix='\n-> ',
-                          context = 3):
-        #frame, lineno = frame_lineno
-        print(self.format_stack_entry(frame_lineno, '', context), file=io.stdout)
+                          context=None):
+        if context is None:
+            context = self.context
+        try:
+            context=int(context)
+            if context <= 0:
+                raise ValueError("Context must be a positive integer")
+        except (TypeError, ValueError):
+                raise ValueError("Context must be a positive integer")
+        print(self.format_stack_entry(frame_lineno, '', context))
 
         # vds: >>
         frame, lineno = frame_lineno
@@ -334,7 +377,15 @@ class Pdb(OldPdb):
         self.shell.hooks.synchronize_with_editor(filename, lineno, 0)
         # vds: <<
 
-    def format_stack_entry(self, frame_lineno, lprefix=': ', context = 3):
+    def format_stack_entry(self, frame_lineno, lprefix=': ', context=None):
+        if context is None:
+            context = self.context
+        try:
+            context=int(context)
+            if context <= 0:
+                print("Context must be a positive integer")
+        except (TypeError, ValueError):
+                print("Context must be a positive integer")
         try:
             import reprlib  # Py 3
         except ImportError:
@@ -424,21 +475,12 @@ class Pdb(OldPdb):
         if arrow:
             # This is the line with the error
             pad = numbers_width - len(str(lineno)) - len(bp_mark)
-            if pad >= 3:
-                marker = '-'*(pad-3) + '-> '
-            elif pad == 2:
-                 marker = '> '
-            elif pad == 1:
-                 marker = '>'
-            else:
-                 marker = ''
-            num = '%s%s' % (marker, str(lineno))
-            line = tpl_line % (bp_mark_color + bp_mark, num, line)
+            num = '%s%s' % (make_arrow(pad), str(lineno))
         else:
             num = '%*s' % (numbers_width - len(bp_mark), str(lineno))
-            line = tpl_line % (bp_mark_color + bp_mark, num, line)
 
-        return line
+        return tpl_line % (bp_mark_color + bp_mark, num, line)
+
 
     def list_command_pydb(self, arg):
         """List command to use if we have a newer pydb installed"""
@@ -471,7 +513,7 @@ class Pdb(OldPdb):
                 src.append(line)
                 self.lineno = lineno
 
-            print(''.join(src), file=io.stdout)
+            print(''.join(src))
 
         except KeyboardInterrupt:
             pass
@@ -509,6 +551,26 @@ class Pdb(OldPdb):
         # vds: <<
 
     do_l = do_list
+
+    def getsourcelines(self, obj):
+        lines, lineno = inspect.findsource(obj)
+        if inspect.isframe(obj) and obj.f_globals is obj.f_locals:
+            # must be a module frame: do not try to cut a block out of it
+            return lines, 1
+        elif inspect.ismodule(obj):
+            return lines, 1
+        return inspect.getblock(lines[lineno:]), lineno+1
+
+    def do_longlist(self, arg):
+        self.lastcmd = 'longlist'
+        try:
+            lines, lineno = self.getsourcelines(self.curframe)
+        except OSError as err:
+            self.error(err)
+            return
+        last = lineno + len(lines)
+        self.print_list_lines(self.curframe.f_code.co_filename, lineno, last)
+    do_ll = do_longlist
 
     def do_pdef(self, arg):
         """Print the call signature for any callable object.
@@ -557,35 +619,19 @@ class Pdb(OldPdb):
                       ('Globals', self.curframe.f_globals)]
         self.shell.find_line_magic('psource')(arg, namespaces=namespaces)
 
-    def checkline(self, filename, lineno):
-        """Check whether specified line seems to be executable.
+    if sys.version_info > (3, ):
+        def do_where(self, arg):
+            """w(here)
+            Print a stack trace, with the most recent frame at the bottom.
+            An arrow indicates the "current frame", which determines the
+            context of most commands. 'bt' is an alias for this command.
 
-        Return `lineno` if it is, 0 if not (e.g. a docstring, comment, blank
-        line or EOF). Warning: testing is not comprehensive.
-        """
-        #######################################################################
-        # XXX Hack!  Use python-2.5 compatible code for this call, because with
-        # all of our changes, we've drifted from the pdb api in 2.6.  For now,
-        # changing:
-        #
-        #line = linecache.getline(filename, lineno, self.curframe.f_globals)
-        # to:
-        #
-        line = linecache.getline(filename, lineno)
-        #
-        # does the trick.  But in reality, we need to fix this by reconciling
-        # our updates with the new Pdb APIs in Python 2.6.
-        #
-        # End hack.  The rest of this method is copied verbatim from 2.6 pdb.py
-        #######################################################################
+            Take a number as argument as an (optional) number of context line to
+            print"""
+            if arg:
+                context = int(arg)
+                self.print_stack_trace(context)
+            else:
+                self.print_stack_trace()
 
-        if not line:
-            print('End of file', file=self.stdout)
-            return 0
-        line = line.strip()
-        # Don't allow setting breakpoint at a blank line
-        if (not line or (line[0] == '#') or
-             (line[:3] == '"""') or line[:3] == "'''"):
-            print('*** Blank or comment', file=self.stdout)
-            return 0
-        return lineno
+        do_w = do_where

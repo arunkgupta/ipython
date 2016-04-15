@@ -1,32 +1,33 @@
 # -*- coding: utf-8 -*-
-"""Top-level display functions for displaying object in different formats.
+"""Top-level display functions for displaying object in different formats."""
 
-Authors:
-
-* Brian Granger
-"""
-
-#-----------------------------------------------------------------------------
-#       Copyright (C) 2013 The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
-
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
 from __future__ import print_function
 
+try:
+    from base64 import encodebytes as base64_encode
+except ImportError:
+    from base64 import encodestring as base64_encode
+
+import json
+import mimetypes
 import os
 import struct
+import sys
+import warnings
 
-from IPython.core.formatters import _safe_get_formatter_method
 from IPython.utils.py3compat import (string_types, cast_bytes_py2, cast_unicode,
                                      unicode_type)
 from IPython.testing.skipdoctest import skip_doctest
-from .displaypub import publish_display_data
+
+__all__ = ['display', 'display_pretty', 'display_html', 'display_markdown',
+'display_svg', 'display_png', 'display_jpeg', 'display_latex', 'display_json',
+'display_javascript', 'display_pdf', 'DisplayObject', 'TextDisplayObject',
+'Pretty', 'HTML', 'Markdown', 'Math', 'Latex', 'SVG', 'JSON', 'Javascript',
+'Image', 'clear_output', 'set_matplotlib_formats', 'set_matplotlib_close',
+'publish_display_data']
 
 #-----------------------------------------------------------------------------
 # utility functions
@@ -78,6 +79,48 @@ def _display_mimetype(mimetype, objs, raw=False, metadata=None):
 # Main functions
 #-----------------------------------------------------------------------------
 
+def publish_display_data(data, metadata=None, source=None):
+    """Publish data and metadata to all frontends.
+
+    See the ``display_data`` message in the messaging documentation for
+    more details about this message type.
+
+    The following MIME types are currently implemented:
+
+    * text/plain
+    * text/html
+    * text/markdown
+    * text/latex
+    * application/json
+    * application/javascript
+    * image/png
+    * image/jpeg
+    * image/svg+xml
+
+    Parameters
+    ----------
+    data : dict
+        A dictionary having keys that are valid MIME types (like
+        'text/plain' or 'image/svg+xml') and values that are the data for
+        that MIME type. The data itself must be a JSON'able data
+        structure. Minimally all data should have the 'text/plain' data,
+        which can be displayed by all frontends. If more than the plain
+        text is given, it is up to the frontend to decide which
+        representation to use.
+    metadata : dict
+        A dictionary for metadata related to the data. This can contain
+        arbitrary key, value pairs that frontends can use to interpret
+        the data. mime-type keys matching those in data can be used
+        to specify metadata about particular representations.
+    source : str, deprecated
+        Unused.
+        """
+    from IPython.core.interactiveshell import InteractiveShell
+    InteractiveShell.instance().display_pub.publish(
+        data=data,
+        metadata=metadata,
+    )
+
 def display(*objs, **kwargs):
     """Display a Python object in all frontends.
 
@@ -115,20 +158,13 @@ def display(*objs, **kwargs):
         format = InteractiveShell.instance().display_formatter.format
 
     for obj in objs:
-
-        # If _ipython_display_ is defined, use that to display this object.
-        display_method = _safe_get_formatter_method(obj, '_ipython_display_')
-        if display_method is not None:
-            try:
-                display_method(**kwargs)
-            except NotImplementedError:
-                pass
-            else:
-                continue
         if raw:
             publish_display_data(data=obj, metadata=metadata)
         else:
             format_dict, md_dict = format(obj, include=include, exclude=exclude)
+            if not format_dict:
+                # nothing to display (e.g. _ipython_display_ took over)
+                continue
             if metadata:
                 # kwarg-specified metadata gets precedence
                 _merge(md_dict, metadata)
@@ -154,6 +190,9 @@ def display_pretty(*objs, **kwargs):
 
 def display_html(*objs, **kwargs):
     """Display the HTML representation of an object.
+    
+    Note: If raw=False and the object does not have a HTML
+    representation, no HTML will be shown.
 
     Parameters
     ----------
@@ -472,7 +511,29 @@ class SVG(DisplayObject):
         return self.data
 
 
-class JSON(TextDisplayObject):
+class JSON(DisplayObject):
+    """JSON expects a JSON-able dict or list
+    
+    not an already-serialized JSON string.
+    
+    Scalar types (None, number, string) are not allowed, only dict or list containers.
+    """
+    # wrap data in a property, which warns about passing already-serialized JSON
+    _data = None
+    def _check_data(self):
+        if self.data is not None and not isinstance(self.data, (dict, list)):
+            raise TypeError("%s expects JSONable dict or list, not %r" % (self.__class__.__name__, self.data))
+
+    @property
+    def data(self):
+        return self._data
+    
+    @data.setter
+    def data(self, data):
+        if isinstance(data, string_types):
+            warnings.warn("JSON expects JSONable dict or list, not JSON strings")
+            data = json.loads(data)
+        self._data = data
 
     def _repr_json_(self):
         return self.data
@@ -584,7 +645,9 @@ class Image(DisplayObject):
     _FMT_PNG = u'png'
     _ACCEPTABLE_EMBEDDINGS = [_FMT_JPEG, _FMT_PNG]
 
-    def __init__(self, data=None, url=None, filename=None, format=u'png', embed=None, width=None, height=None, retina=False):
+    def __init__(self, data=None, url=None, filename=None, format=None,
+                 embed=None, width=None, height=None, retina=False,
+                 unconfined=False, metadata=None):
         """Create a PNG/JPEG image object given raw data.
 
         When this object is returned by an input cell or passed to the
@@ -625,6 +688,10 @@ class Image(DisplayObject):
             from image data.
             For non-embedded images, you can just set the desired display width
             and height directly.
+        unconfined: bool
+            Set unconfined=True to disable max-width confinement of the image.
+        metadata: dict
+            Specify extra metadata to attach to the image.
 
         Examples
         --------
@@ -655,17 +722,27 @@ class Image(DisplayObject):
         else:
             ext = None
 
-        if ext is not None:
-            format = ext.lower()
-            if ext == u'jpg' or ext == u'jpeg':
-                format = self._FMT_JPEG
-            if ext == u'png':
-                format = self._FMT_PNG
-        elif isinstance(data, bytes) and format == 'png':
-            # infer image type from image data header,
-            # only if format might not have been specified.
-            if data[:2] == _JPEG:
-                format = 'jpeg'
+        if format is None:
+            if ext is not None:
+                if ext == u'jpg' or ext == u'jpeg':
+                    format = self._FMT_JPEG
+                if ext == u'png':
+                    format = self._FMT_PNG
+                else:
+                    format = ext.lower()
+            elif isinstance(data, bytes):
+                # infer image type from image data header,
+                # only if format has not been specified.
+                if data[:2] == _JPEG:
+                    format = self._FMT_JPEG
+
+        # failed to detect format, default png
+        if format is None:
+            format = 'png'
+
+        if format.lower() == 'jpg':
+            # jpg->jpeg
+            format = self._FMT_JPEG
 
         self.format = unicode_type(format).lower()
         self.embed = embed if embed is not None else (url is None)
@@ -675,6 +752,8 @@ class Image(DisplayObject):
         self.width = width
         self.height = height
         self.retina = retina
+        self.unconfined = unconfined
+        self.metadata = metadata
         super(Image, self).__init__(data=data, url=url, filename=filename)
         
         if retina:
@@ -703,12 +782,19 @@ class Image(DisplayObject):
 
     def _repr_html_(self):
         if not self.embed:
-            width = height = ''
+            width = height = klass = ''
             if self.width:
                 width = ' width="%d"' % self.width
             if self.height:
                 height = ' height="%d"' % self.height
-            return u'<img src="%s"%s%s/>' % (self.url, width, height)
+            if self.unconfined:
+                klass = ' class="unconfined"'
+            return u'<img src="{url}"{width}{height}{klass}/>'.format(
+                url=self.url,
+                width=width,
+                height=height,
+                klass=klass,
+            )
 
     def _data_and_metadata(self):
         """shortcut for returning metadata with shape information, if defined"""
@@ -717,6 +803,10 @@ class Image(DisplayObject):
             md['width'] = self.width
         if self.height:
             md['height'] = self.height
+        if self.unconfined:
+            md['unconfined'] = self.unconfined
+        if self.metadata:
+            md.update(self.metadata)
         if md:
             return self.data, md
         else:
@@ -733,6 +823,110 @@ class Image(DisplayObject):
     def _find_ext(self, s):
         return unicode_type(s.split('.')[-1].lower())
 
+class Video(DisplayObject):
+
+    def __init__(self, data=None, url=None, filename=None, embed=False, mimetype=None):
+        """Create a video object given raw data or an URL.
+
+        When this object is returned by an input cell or passed to the
+        display function, it will result in the video being displayed
+        in the frontend.
+
+        Parameters
+        ----------
+        data : unicode, str or bytes
+            The raw video data or a URL or filename to load the data from.
+            Raw data will require passing `embed=True`.
+        url : unicode
+            A URL for the video. If you specify `url=`,
+            the image data will not be embedded.
+        filename : unicode
+            Path to a local file containing the video.
+            Will be interpreted as a local URL unless `embed=True`.
+        embed : bool
+            Should the video be embedded using a data URI (True) or be
+            loaded using a <video> tag (False).
+
+            Since videos are large, embedding them should be avoided, if possible.
+            You must confirm embedding as your intention by passing `embed=True`.
+
+            Local files can be displayed with URLs without embedding the content, via::
+
+                Video('./video.mp4')
+
+        mimetype: unicode
+            Specify the mimetype for embedded videos.
+            Default will be guessed from file extension, if available.
+
+        Examples
+        --------
+
+        Video('https://archive.org/download/Sita_Sings_the_Blues/Sita_Sings_the_Blues_small.mp4')
+        Video('path/to/video.mp4')
+        Video('path/to/video.mp4', embed=True)
+        Video(b'raw-videodata', embed=True)
+        """
+        if url is None and isinstance(data, string_types) and data.startswith(('http:', 'https:')):
+            url = data
+            data = None
+        elif os.path.exists(data):
+            filename = data
+            data = None
+        
+        if data and not embed:
+            msg = ''.join([
+                "To embed videos, you must pass embed=True ",
+                "(this may make your notebook files huge)\n",
+                "Consider passing Video(url='...')",
+            ])
+            raise ValueError(msg)
+
+        self.mimetype = mimetype
+        self.embed = embed
+        super(Video, self).__init__(data=data, url=url, filename=filename)
+
+    def _repr_html_(self):
+        # External URLs and potentially local files are not embedded into the
+        # notebook output.
+        if not self.embed:
+            url = self.url if self.url is not None else self.filename
+            output = """<video src="{0}" controls>
+      Your browser does not support the <code>video</code> element.
+    </video>""".format(url)
+            return output
+        
+        # Embedded videos are base64-encoded.
+        mimetype = self.mimetype
+        if self.filename is not None:
+            if not mimetype:
+                mimetype, _ = mimetypes.guess_type(self.filename)
+            
+            with open(self.filename, 'rb') as f:
+                video = f.read()
+        else:
+            video = self.data
+        if isinstance(video, unicode_type):
+            # unicode input is already b64-encoded
+            b64_video = video
+        else:
+            b64_video = base64_encode(video).decode('ascii').rstrip()
+        
+        output = """<video controls>
+ <source src="data:{0};base64,{1}" type="{0}">
+ Your browser does not support the video tag.
+ </video>""".format(mimetype, b64_video)
+        return output
+
+    def reload(self):
+        # TODO
+        pass
+
+    def _repr_png_(self):
+        # TODO
+        pass
+    def _repr_jpeg_(self):
+        # TODO
+        pass
 
 def clear_output(wait=False):
     """Clear the output of the current cell receiving output.
@@ -745,11 +939,10 @@ def clear_output(wait=False):
     if InteractiveShell.initialized():
         InteractiveShell.instance().display_pub.clear_output(wait)
     else:
-        from IPython.utils import io
-        print('\033[2K\r', file=io.stdout, end='')
-        io.stdout.flush()
-        print('\033[2K\r', file=io.stderr, end='')
-        io.stderr.flush()
+        print('\033[2K\r', end='')
+        sys.stdout.flush()
+        print('\033[2K\r', end='')
+        sys.stderr.flush()
 
 
 @skip_doctest
@@ -774,9 +967,9 @@ def set_matplotlib_formats(*formats, **kwargs):
     """
     from IPython.core.interactiveshell import InteractiveShell
     from IPython.core.pylabtools import select_figure_formats
-    from IPython.kernel.zmq.pylab.config import InlineBackend
     # build kwargs, starting with InlineBackend config
     kw = {}
+    from ipykernel.pylab.config import InlineBackend
     cfg = InlineBackend.instance()
     kw.update(cfg.print_figure_kwargs)
     kw.update(**kwargs)
@@ -805,7 +998,7 @@ def set_matplotlib_close(close=True):
         Should all matplotlib figures be automatically closed after each cell is
         run?
     """
-    from IPython.kernel.zmq.pylab.config import InlineBackend
+    from ipykernel.pylab.config import InlineBackend
     cfg = InlineBackend.instance()
     cfg.close_figures = close
 

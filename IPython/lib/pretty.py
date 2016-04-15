@@ -34,14 +34,8 @@ pretty printer passed::
         def _repr_pretty_(self, p, cycle):
             ...
 
-Depending on the python version you want to support you have two
-possibilities.  The following list shows the python 2.5 version and the
-compatibility one.
-
-
-Here the example implementation of a `_repr_pretty_` method for a list
-subclass for python 2.5 and higher (python 2.5 requires the with statement
-__future__ import)::
+Here is an example implementation of a `_repr_pretty_` method for a list
+subclass::
 
     class MyList(list):
 
@@ -64,35 +58,15 @@ default space.  `p.pretty` prettyprints another object using the pretty print
 method.
 
 The first parameter to the `group` function specifies the extra indentation
-of the next line.  In this example the next item will either be not
-breaked (if the items are short enough) or aligned with the right edge of
-the opening bracked of `MyList`.
-
-If you want to support python 2.4 and lower you can use this code::
-
-    class MyList(list):
-
-        def _repr_pretty_(self, p, cycle):
-            if cycle:
-                p.text('MyList(...)')
-            else:
-                p.begin_group(8, 'MyList([')
-                for idx, item in enumerate(self):
-                    if idx:
-                        p.text(',')
-                        p.breakable()
-                    p.pretty(item)
-                p.end_group(8, '])')
+of the next line.  In this example the next item will either be on the same
+line (if the items are short enough) or aligned with the right edge of the
+opening bracket of `MyList`.
 
 If you just want to indent something you can use the group function
-without open / close parameters.  Under python 2.5 you can also use this
-code::
+without open / close parameters.  You can also use this code::
 
     with p.indent(2):
         ...
-
-Or under python2.4 you might want to modify ``p.indentation`` by hand but
-this is rather ugly.
 
 Inheritance diagram:
 
@@ -111,63 +85,18 @@ import re
 import datetime
 from collections import deque
 
-from IPython.utils.py3compat import PY3
+from IPython.utils.py3compat import PY3, cast_unicode, string_types
+from IPython.utils.encoding import get_stream_enc
 
-if PY3:
-    from io import StringIO
-else:
-    from StringIO import StringIO
+from io import StringIO
 
 
 __all__ = ['pretty', 'pprint', 'PrettyPrinter', 'RepresentationPrinter',
     'for_type', 'for_type_by_name']
 
 
+MAX_SEQ_LENGTH = 1000
 _re_pattern_type = type(re.compile(''))
-
-def _failed_repr(obj, e):
-    """Render a failed repr, including the exception.
-    
-    Tries to get exception and type info
-    """
-    # get exception name
-    if e.__class__.__module__ in ('exceptions', 'builtins'):
-        ename = e.__class__.__name__
-    else:
-        ename = '{}.{}'.format(
-            e.__class__.__module__,
-            e.__class__.__name__,
-        )
-    # and exception string, which sometimes fails
-    # (usually due to unicode error message)
-    try:
-        estr = str(e)
-    except Exception:
-        estr = "unknown"
-    
-    # and class name
-    try:
-        klass = _safe_getattr(obj, '__class__', None) or type(obj)
-        mod = _safe_getattr(klass, '__module__', None)
-        if mod in (None, '__builtin__', 'builtins', 'exceptions'):
-            classname = klass.__name__
-        else:
-            classname = mod + '.' + klass.__name__
-    except Exception:
-        # this may be paranoid, but we already know repr is broken
-        classname = "unknown type"
-    
-    # the informative repr
-    return "<repr(<{} at 0x{:x}>) failed: {}: {}>".format(
-        classname, id(obj), ename, estr,
-    )
-
-def _safe_repr(obj):
-    """Don't assume repr is not broken."""
-    try:
-        return repr(obj)
-    except Exception as e:
-        return _failed_repr(obj, e)
 
 def _safe_getattr(obj, attr, default=None):
     """Safe version of getattr.
@@ -180,22 +109,32 @@ def _safe_getattr(obj, attr, default=None):
     except Exception:
         return default
 
-def pretty(obj, verbose=False, max_width=79, newline='\n'):
+if PY3:
+    CUnicodeIO = StringIO
+else:
+    class CUnicodeIO(StringIO):
+        """StringIO that casts str to unicode on Python 2"""
+        def write(self, text):
+            return super(CUnicodeIO, self).write(
+                cast_unicode(text, encoding=get_stream_enc(sys.stdout)))
+
+
+def pretty(obj, verbose=False, max_width=79, newline='\n', max_seq_length=MAX_SEQ_LENGTH):
     """
     Pretty print the object's representation.
     """
-    stream = StringIO()
-    printer = RepresentationPrinter(stream, verbose, max_width, newline)
+    stream = CUnicodeIO()
+    printer = RepresentationPrinter(stream, verbose, max_width, newline, max_seq_length=max_seq_length)
     printer.pretty(obj)
     printer.flush()
     return stream.getvalue()
 
 
-def pprint(obj, verbose=False, max_width=79, newline='\n'):
+def pprint(obj, verbose=False, max_width=79, newline='\n', max_seq_length=MAX_SEQ_LENGTH):
     """
     Like `pretty` but print to stdout.
     """
-    printer = RepresentationPrinter(sys.stdout, verbose, max_width, newline)
+    printer = RepresentationPrinter(sys.stdout, verbose, max_width, newline, max_seq_length=max_seq_length)
     printer.pretty(obj)
     printer.flush()
     sys.stdout.write(newline)
@@ -229,7 +168,7 @@ class PrettyPrinter(_PrettyPrinterBase):
     callback method.
     """
 
-    def __init__(self, output, max_width=79, newline='\n', max_seq_length=1000):
+    def __init__(self, output, max_width=79, newline='\n', max_seq_length=MAX_SEQ_LENGTH):
         self.output = output
         self.max_width = max_width
         self.newline = newline
@@ -334,7 +273,7 @@ class PrettyPrinter(_PrettyPrinterBase):
                 self.text(',')
                 self.breakable()
                 self.text('...')
-                raise StopIteration
+                return
             yield idx, x
     
     def end_group(self, dedent=0, close=''):
@@ -389,9 +328,10 @@ class RepresentationPrinter(PrettyPrinter):
     """
 
     def __init__(self, output, verbose=False, max_width=79, newline='\n',
-        singleton_pprinters=None, type_pprinters=None, deferred_pprinters=None):
+        singleton_pprinters=None, type_pprinters=None, deferred_pprinters=None,
+        max_seq_length=MAX_SEQ_LENGTH):
 
-        PrettyPrinter.__init__(self, output, max_width, newline)
+        PrettyPrinter.__init__(self, output, max_width, newline, max_seq_length=max_seq_length)
         self.verbose = verbose
         self.stack = []
         if singleton_pprinters is None:
@@ -560,11 +500,7 @@ def _default_pprint(obj, p, cycle):
     klass = _safe_getattr(obj, '__class__', None) or type(obj)
     if _safe_getattr(klass, '__repr__', None) not in _baseclass_reprs:
         # A user-provided repr. Find newlines and replace them with p.break_()
-        output = _safe_repr(obj)
-        for idx,output_line in enumerate(output.splitlines()):
-            if idx:
-                p.break_()
-            p.text(output_line)
+        _repr_pprint(obj, p, cycle)
         return
     p.begin_group(1, '<')
     p.pretty(klass)
@@ -639,13 +575,14 @@ def _set_pprinter_factory(start, end, basetype):
         else:
             step = len(start)
             p.begin_group(step, start)
-            # Like dictionary keys, we will try to sort the items.
-            items = list(obj)
-            try:
-                items.sort()
-            except Exception:
-                # Sometimes the items don't sort.
-                pass
+            # Like dictionary keys, we will try to sort the items if there aren't too many
+            items = obj
+            if not (p.max_seq_length and len(obj) >= p.max_seq_length):
+                try:
+                    items = sorted(obj)
+                except Exception:
+                    # Sometimes the items don't sort.
+                    pass
             for idx, x in p._enumerate(items):
                 if idx:
                     p.text(',')
@@ -670,11 +607,13 @@ def _dict_pprinter_factory(start, end, basetype=None):
             return p.text('{...}')
         p.begin_group(1, start)
         keys = obj.keys()
-        try:
-            keys.sort()
-        except Exception as e:
-            # Sometimes the keys don't sort.
-            pass
+        # if dict isn't large enough to be truncated, sort keys before displaying
+        if not (p.max_seq_length and len(obj) >= p.max_seq_length):
+            try:
+                keys = sorted(keys)
+            except Exception:
+                # Sometimes the keys don't sort.
+                pass
         for idx, key in p._enumerate(keys):
             if idx:
                 p.text(',')
@@ -725,8 +664,23 @@ def _type_pprint(obj, p, cycle):
     """The pprint for classes and types."""
     # Heap allocated types might not have the module attribute,
     # and others may set it to None.
+
+    # Checks for a __repr__ override in the metaclass
+    if type(obj).__repr__ is not type.__repr__:
+        _repr_pprint(obj, p, cycle)
+        return
+
     mod = _safe_getattr(obj, '__module__', None)
-    name = _safe_getattr(obj, '__qualname__', obj.__name__)
+    try:
+        name = obj.__qualname__
+        if not isinstance(name, string_types):
+            # This can happen if the type implements __qualname__ as a property
+            # or other descriptor in Python 2.
+            raise Exception("Try __name__")
+    except Exception:
+        name = obj.__name__
+        if not isinstance(name, string_types):
+            name = '<unknown type>'
 
     if mod in (None, '__builtin__', 'builtins', 'exceptions'):
         p.text(name)
@@ -736,7 +690,12 @@ def _type_pprint(obj, p, cycle):
 
 def _repr_pprint(obj, p, cycle):
     """A pprint that just redirects to the normal repr function."""
-    p.text(_safe_repr(obj))
+    # Find newlines and replace them with p.break_()
+    output = repr(obj)
+    for idx,output_line in enumerate(output.splitlines()):
+        if idx:
+            p.break_()
+        p.text(output_line)
 
 
 def _function_pprint(obj, p, cycle):
@@ -839,6 +798,47 @@ def for_type_by_name(type_module, type_name, func):
 _singleton_pprinters = dict.fromkeys(map(id, [None, True, False, Ellipsis,
                                       NotImplemented]), _repr_pprint)
 
+
+def _defaultdict_pprint(obj, p, cycle):
+    name = obj.__class__.__name__
+    with p.group(len(name) + 1, name + '(', ')'):
+        if cycle:
+            p.text('...')
+        else:
+            p.pretty(obj.default_factory)
+            p.text(',')
+            p.breakable()
+            p.pretty(dict(obj))
+
+def _ordereddict_pprint(obj, p, cycle):
+    name = obj.__class__.__name__
+    with p.group(len(name) + 1, name + '(', ')'):
+        if cycle:
+            p.text('...')
+        elif len(obj):
+            p.pretty(list(obj.items()))
+
+def _deque_pprint(obj, p, cycle):
+    name = obj.__class__.__name__
+    with p.group(len(name) + 1, name + '(', ')'):
+        if cycle:
+            p.text('...')
+        else:
+            p.pretty(list(obj))
+
+
+def _counter_pprint(obj, p, cycle):
+    name = obj.__class__.__name__
+    with p.group(len(name) + 1, name + '(', ')'):
+        if cycle:
+            p.text('...')
+        elif len(obj):
+            p.pretty(dict(obj))
+
+for_type_by_name('collections', 'defaultdict', _defaultdict_pprint)
+for_type_by_name('collections', 'OrderedDict', _ordereddict_pprint)
+for_type_by_name('collections', 'deque', _deque_pprint)
+for_type_by_name('collections', 'Counter', _counter_pprint)
 
 if __name__ == '__main__':
     from random import randrange

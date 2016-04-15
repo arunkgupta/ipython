@@ -1,26 +1,9 @@
 # encoding: utf-8
 """
 An embedded IPython shell.
-
-Authors:
-
-* Brian Granger
-* Fernando Perez
-
-Notes
------
 """
-
-#-----------------------------------------------------------------------------
-#  Copyright (C) 2008-2011  The IPython Development Team
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#-----------------------------------------------------------------------------
-
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 
 from __future__ import with_statement
 from __future__ import print_function
@@ -31,16 +14,14 @@ import warnings
 from IPython.core import ultratb, compilerop
 from IPython.core.magic import Magics, magics_class, line_magic
 from IPython.core.interactiveshell import DummyMod
-from IPython.terminal.interactiveshell import TerminalInteractiveShell
+from IPython.core.interactiveshell import InteractiveShell
+from IPython.terminal.ptshell import TerminalInteractiveShell
 from IPython.terminal.ipapp import load_default_config
 
-from IPython.utils.traitlets import Bool, CBool, Unicode
+from traitlets import Bool, CBool, Unicode
 from IPython.utils.io import ask_yes_no
 
-
-#-----------------------------------------------------------------------------
-# Classes and functions
-#-----------------------------------------------------------------------------
+class KillEmbeded(Exception):pass
 
 # This is an additional magic that is exposed in embedded shells.
 @magics_class
@@ -66,12 +47,27 @@ class EmbeddedMagics(Magics):
                    "once you exit.")
 
 
+    @line_magic
+    def exit_raise(self, parameter_s=''):
+        """%exit_raise Make the current embedded kernel exit and raise and exception.
+
+        This function sets an internal flag so that an embedded IPython will
+        raise a `IPython.terminal.embed.KillEmbeded` Exception on exit, and then exit the current I. This is
+        useful to permanently exit a loop that create IPython embed instance.
+        """
+
+        self.shell.should_raise = True
+        self.shell.ask_exit()
+
+
+
 class InteractiveShellEmbed(TerminalInteractiveShell):
 
     dummy_mode = Bool(False)
     exit_msg = Unicode('')
     embedded = CBool(True)
     embedded_active = CBool(True)
+    should_raise = CBool(False)
     # Like the base class display_banner is not configurable, but here it
     # is True by default.
     display_banner = CBool(True)
@@ -83,7 +79,7 @@ class InteractiveShellEmbed(TerminalInteractiveShell):
     
         if kw.get('user_global_ns', None) is not None:
             warnings.warn("user_global_ns has been replaced by user_module. The\
-                           parameter will be ignored.", DeprecationWarning)
+                           parameter will be ignored, and removed in IPython 5.0", DeprecationWarning)
 
         super(InteractiveShellEmbed,self).__init__(**kw)
 
@@ -140,6 +136,9 @@ class InteractiveShellEmbed(TerminalInteractiveShell):
         else:
             self.old_banner2 = ''
 
+        if self.display_banner:
+            self.show_banner()
+
         # Call the embedding code with a stack depth of 1 so it can skip over
         # our call and get the original caller's namespaces.
         self.mainloop(local_ns, module, stack_depth=stack_depth,
@@ -149,6 +148,10 @@ class InteractiveShellEmbed(TerminalInteractiveShell):
 
         if self.exit_msg is not None:
             print(self.exit_msg)
+
+        if self.should_raise:
+            raise KillEmbeded('Embedded IPython raising error, as user requested.')
+
 
     def mainloop(self, local_ns=None, module=None, stack_depth=0,
                  display_banner=None, global_ns=None, compile_flags=None):
@@ -178,9 +181,12 @@ class InteractiveShellEmbed(TerminalInteractiveShell):
         """
         
         if (global_ns is not None) and (module is None):
-            warnings.warn("global_ns is deprecated, use module instead.", DeprecationWarning)
+            warnings.warn("global_ns is deprecated, and will be removed in IPython 5.0 use module instead.", DeprecationWarning)
             module = DummyMod()
             module.__dict__ = global_ns
+
+        if (display_banner is not None):
+            warnings.warn("The display_banner parameter is deprecated.", DeprecationWarning)
 
         # Get locals and globals from caller
         if ((local_ns is None or module is None or compile_flags is None)
@@ -191,7 +197,14 @@ class InteractiveShellEmbed(TerminalInteractiveShell):
                 local_ns = call_frame.f_locals
             if module is None:
                 global_ns = call_frame.f_globals
-                module = sys.modules[global_ns['__name__']]
+                try:
+                    module = sys.modules[global_ns['__name__']]
+                except KeyError:
+                    warnings.warn("Failed to get module %s" % \
+                        global_ns.get('__name__', 'unknown module')
+                    )
+                    module = DummyMod()
+                    module.__dict__ = global_ns
             if compile_flags is None:
                 compile_flags = (call_frame.f_code.co_flags &
                                  compilerop.PyCF_MASK)
@@ -213,34 +226,25 @@ class InteractiveShellEmbed(TerminalInteractiveShell):
         # like _ih and get_ipython() into the local namespace, but delete them
         # later.
         if local_ns is not None:
-            self.user_ns = local_ns
+            reentrant_local_ns = {k: v for (k, v) in local_ns.items() if k not in self.user_ns_hidden.keys()}
+            self.user_ns = reentrant_local_ns
             self.init_user_ns()
 
         # Compiler flags
         if compile_flags is not None:
             self.compile.flags = compile_flags
 
-        # Patch for global embedding to make sure that things don't overwrite
-        # user globals accidentally. Thanks to Richard <rxe@renre-europe.com>
-        # FIXME. Test this a bit more carefully (the if.. is new)
-        # N.B. This can't now ever be called. Not sure what it was for.
-        # And now, since it wasn't called in the previous version, I'm
-        # commenting out these lines so they can't be called with my new changes
-        # --TK, 2011-12-10
-        #if local_ns is None and module is None:
-        #    self.user_global_ns.update(__main__.__dict__)
-
         # make sure the tab-completer has the correct frame information, so it
         # actually completes using the frame's locals/globals
         self.set_completer_frame()
 
         with self.builtin_trap, self.display_trap:
-            self.interact(display_banner=display_banner)
+            self.interact()
         
         # now, purge out the local namespace of IPython's hidden variables.
         if local_ns is not None:
-            for name in self.user_ns_hidden:
-                local_ns.pop(name, None)
+            local_ns.update({k: v for (k, v) in self.user_ns.items() if k not in self.user_ns_hidden.keys()})
+
         
         # Restore original namespace so shell can shut down when we exit.
         self.user_module = orig_user_module
@@ -265,10 +269,10 @@ def embed(**kwargs):
         from IPython import embed
         a = 10
         b = 20
-        embed('First time')
+        embed(header='First time')
         c = 30
         d = 40
-        embed
+        embed()
 
     Full customization can be done by passing a :class:`Config` in as the
     config argument.
@@ -279,6 +283,30 @@ def embed(**kwargs):
     if config is None:
         config = load_default_config()
         config.InteractiveShellEmbed = config.TerminalInteractiveShell
+        config.InteractiveShellEmbed.colors='nocolor'
         kwargs['config'] = config
+    #save ps1/ps2 if defined
+    ps1 = None
+    ps2 = None
+    try:
+        ps1 = sys.ps1
+        ps2 = sys.ps2
+    except AttributeError:
+        pass
+    #save previous instance
+    saved_shell_instance = InteractiveShell._instance
+    if saved_shell_instance is not None:
+        cls = type(saved_shell_instance)
+        cls.clear_instance()
     shell = InteractiveShellEmbed.instance(**kwargs)
     shell(header=header, stack_depth=2, compile_flags=compile_flags)
+    InteractiveShellEmbed.clear_instance()
+    #restore previous instance
+    if saved_shell_instance is not None:
+        cls = type(saved_shell_instance)
+        cls.clear_instance()
+        for subclass in cls._walk_mro():
+            subclass._instance = saved_shell_instance
+    if ps1 is not None:
+        sys.ps1 = ps1
+        sys.ps2 = ps2

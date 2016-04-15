@@ -1,3 +1,4 @@
+# encoding: utf-8
 """Word completion for IPython.
 
 This module is a fork of the rlcompleter module in the Python standard
@@ -46,25 +47,11 @@ Notes:
   used, and this module (and the readline module) are silently inactive.
 """
 
-#*****************************************************************************
+# Copyright (c) IPython Development Team.
+# Distributed under the terms of the Modified BSD License.
 #
-# Since this file is essentially a minimally modified copy of the rlcompleter
-# module which is part of the standard Python distribution, I assume that the
-# proper procedure is to maintain its copyright as belonging to the Python
-# Software Foundation (in addition to my own, for all new code).
-#
-#       Copyright (C) 2008 IPython Development Team
-#       Copyright (C) 2001 Fernando Perez. <fperez@colorado.edu>
-#       Copyright (C) 2001 Python Software Foundation, www.python.org
-#
-#  Distributed under the terms of the BSD License.  The full license is in
-#  the file COPYING, distributed as part of this software.
-#
-#*****************************************************************************
-
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
+# Some of this code originated from rlcompleter in the Python standard library
+# Copyright (C) 2001 Python Software Foundation, www.python.org
 
 import __main__
 import glob
@@ -74,16 +61,20 @@ import keyword
 import os
 import re
 import sys
+import unicodedata
+import string
 
-from IPython.config.configurable import Configurable
+from traitlets.config.configurable import Configurable 
 from IPython.core.error import TryNext
 from IPython.core.inputsplitter import ESC_MAGIC
+from IPython.core.latex_symbols import latex_symbols, reverse_latex_symbol
 from IPython.utils import generics
 from IPython.utils import io
-from IPython.utils.dir2 import dir2
+from IPython.utils.decorators import undoc
+from IPython.utils.dir2 import dir2, get_real_method
 from IPython.utils.process import arg_split
-from IPython.utils.py3compat import builtin_mod, string_types
-from IPython.utils.traitlets import CBool, Enum
+from IPython.utils.py3compat import builtin_mod, string_types, PY3
+from traitlets import CBool, Enum
 
 #-----------------------------------------------------------------------------
 # Globals
@@ -179,44 +170,41 @@ def compress_user(path, tilde_expand, tilde_val):
 
 
 
-def penalize_magics_key(word):
-    """key for sorting that penalizes magic commands in the ordering
+def completions_sorting_key(word):
+    """key for sorting completions
 
-    Normal words are left alone.
+    This does several things:
 
-    Magic commands have the initial % moved to the end, e.g.
-    %matplotlib is transformed as follows:
-
-    %matplotlib -> matplotlib%
-
-    [The choice of the final % is arbitrary.]
-
-    Since "matplotlib" < "matplotlib%" as strings, 
-    "timeit" will appear before the magic "%timeit" in the ordering
-
-    For consistency, move "%%" to the end, so cell magics appear *after*
-    line magics with the same name.
-
-    A check is performed that there are no other "%" in the string; 
-    if there are, then the string is not a magic command and is left unchanged.
-
+    - Lowercase all completions, so they are sorted alphabetically with
+      upper and lower case words mingled
+    - Demote any completions starting with underscores to the end
+    - Insert any %magic and %%cellmagic completions in the alphabetical order
+      by their name
     """
+    # Case insensitive sort
+    word = word.lower()
 
-    # Move any % signs from start to end of the key 
-    # provided there are no others elsewhere in the string
+    prio1, prio2 = 0, 0
 
-    if word[:2] == "%%":
+    if word.startswith('__'):
+        prio1 = 2
+    elif word.startswith('_'):
+        prio1 = 1
+
+    if word.startswith('%%'):
+        # If there's another % in there, this is something else, so leave it alone
         if not "%" in word[2:]:
-            return word[2:] + "%%" 
-
-    if word[:1] == "%":
+            word = word[2:]
+            prio2 = 2
+    elif word.startswith('%'):
         if not "%" in word[1:]:
-            return word[1:] + "%"
-    
-    return word
+            word = word[1:]
+            prio2 = 1
+
+    return prio1, word, prio2
 
 
-
+@undoc
 class Bunch(object): pass
 
 
@@ -427,7 +415,7 @@ def get__all__entries(obj):
     return [w for w in words if isinstance(w, string_types)]
 
 
-def match_dict_keys(keys, prefix):
+def match_dict_keys(keys, prefix, delims):
     """Used by dict_key_matches, matching the prefix to a list of keys"""
     if not prefix:
         return None, 0, [repr(k) for k in keys
@@ -438,8 +426,9 @@ def match_dict_keys(keys, prefix):
         prefix_str = eval(prefix + quote, {})
     except Exception:
         return None, 0, []
-    
-    token_match = re.search(r'\w*$', prefix, re.UNICODE)
+
+    pattern = '[^' + ''.join('\\' + c for c in delims) + ']*$'
+    token_match = re.search(pattern, prefix, re.UNICODE)
     token_start = token_match.start()
     token_prefix = token_match.group()
 
@@ -483,6 +472,63 @@ def _safe_isinstance(obj, module, class_name):
     return (module in sys.modules and
             isinstance(obj, getattr(__import__(module), class_name)))
 
+
+def back_unicode_name_matches(text):
+    u"""Match unicode characters back to unicode name
+    
+    This does  ☃ -> \\snowman
+
+    Note that snowman is not a valid python3 combining character but will be expanded.
+    Though it will not recombine back to the snowman character by the completion machinery.
+
+    This will not either back-complete standard sequences like \\n, \\b ...
+    
+    Used on Python 3 only.
+    """
+    if len(text)<2:
+        return u'', ()
+    maybe_slash = text[-2]
+    if maybe_slash != '\\':
+        return u'', ()
+
+    char = text[-1]
+    # no expand on quote for completion in strings.
+    # nor backcomplete standard ascii keys
+    if char in string.ascii_letters or char in ['"',"'"]:
+        return u'', ()
+    try :
+        unic = unicodedata.name(char)
+        return '\\'+char,['\\'+unic]
+    except KeyError as e:
+        pass
+    return u'', ()
+
+def back_latex_name_matches(text):
+    u"""Match latex characters back to unicode name
+    
+    This does  ->\\sqrt
+
+    Used on Python 3 only.
+    """
+    if len(text)<2:
+        return u'', ()
+    maybe_slash = text[-2]
+    if maybe_slash != '\\':
+        return u'', ()
+
+
+    char = text[-1]
+    # no expand on quote for completion in strings.
+    # nor backcomplete standard ascii keys
+    if char in string.ascii_letters or char in ['"',"'"]:
+        return u'', ()
+    try :
+        latex = reverse_latex_symbol[char]
+        # '\\' replace the \ as well
+        return '\\'+char,[latex]
+    except KeyError as e:
+        pass
+    return u'', ()
 
 
 class IPCompleter(Completer):
@@ -734,7 +780,7 @@ class IPCompleter(Completer):
                     else:
                         # true if txt is _not_ a _ name, false otherwise:
                         no__name = (lambda txt:
-                                    re.match(r'.*\._.*?',txt) is None)
+                                    re.match(r'\._.*?',txt[txt.rindex('.'):]) is None)
                     matches = filter(no__name, matches)
             except NameError:
                 # catches <undefined attributes>.<tab>
@@ -789,22 +835,31 @@ class IPCompleter(Completer):
             # for all others, check if they are __call__able
             elif hasattr(obj, '__call__'):
                 call_obj = obj.__call__
-
         ret += self._default_arguments_from_docstring(
                  getattr(call_obj, '__doc__', ''))
 
+        if PY3:
+            _keeps = (inspect.Parameter.KEYWORD_ONLY,
+                      inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            signature = inspect.signature
+        else:
+            import IPython.utils.signatures
+            _keeps = (IPython.utils.signatures.Parameter.KEYWORD_ONLY,
+                      IPython.utils.signatures.Parameter.POSITIONAL_OR_KEYWORD)
+            signature = IPython.utils.signatures.signature
+
         try:
-            args,_,_1,defaults = inspect.getargspec(call_obj)
-            if defaults:
-                ret+=args[-len(defaults):]
-        except TypeError:
+            sig = signature(call_obj)
+            ret.extend(k for k, v in sig.parameters.items() if
+                       v.kind in _keeps)
+        except ValueError:
             pass
 
         return list(set(ret))
 
     def python_func_kw_matches(self,text):
         """Match named parameters (kwargs) of the last open function"""
-        
+
         if "." in text: # a parameter cannot be dotted
             return []
         try: regexp = self.__funcParamsRegex
@@ -865,15 +920,23 @@ class IPCompleter(Completer):
         return argMatches
 
     def dict_key_matches(self, text):
+        "Match string keys in a dictionary, after e.g. 'foo[' "
         def get_keys(obj):
-            # Only allow completion for known in-memory dict-like types
+            # Objects can define their own completions by defining an
+            # _ipy_key_completions_() method.
+            method = get_real_method(obj, '_ipython_key_completions_')
+            if method is not None:
+                return method()
+
+            # Special case some common in-memory dict-like types
             if isinstance(obj, dict) or\
                _safe_isinstance(obj, 'pandas', 'DataFrame'):
                 try:
                     return list(obj.keys())
                 except Exception:
                     return []
-            elif _safe_isinstance(obj, 'numpy', 'ndarray'):
+            elif _safe_isinstance(obj, 'numpy', 'ndarray') or\
+                 _safe_isinstance(obj, 'numpy', 'void'):
                 return obj.dtype.names or []
             return []
 
@@ -922,7 +985,7 @@ class IPCompleter(Completer):
         keys = get_keys(obj)
         if not keys:
             return keys
-        closing_quote, token_offset, matches = match_dict_keys(keys, prefix)
+        closing_quote, token_offset, matches = match_dict_keys(keys, prefix, self.splitter.delims)
         if not matches:
             return matches
         
@@ -963,6 +1026,53 @@ class IPCompleter(Completer):
                 suf += ']'
         
         return [leading + k + suf for k in matches]
+
+    def unicode_name_matches(self, text):
+        u"""Match Latex-like syntax for unicode characters base 
+        on the name of the character.
+        
+        This does  \\GREEK SMALL LETTER ETA -> η
+
+        Works only on valid python 3 identifier, or on combining characters that 
+        will combine to form a valid identifier.
+        
+        Used on Python 3 only.
+        """
+        slashpos = text.rfind('\\')
+        if slashpos > -1:
+            s = text[slashpos+1:]
+            try :
+                unic = unicodedata.lookup(s)
+                # allow combining chars
+                if ('a'+unic).isidentifier():
+                    return '\\'+s,[unic]
+            except KeyError as e:
+                pass
+        return u'', []
+
+
+
+
+    def latex_matches(self, text):
+        u"""Match Latex syntax for unicode characters.
+        
+        This does both \\alp -> \\alpha and \\alpha -> α
+        
+        Used on Python 3 only.
+        """
+        slashpos = text.rfind('\\')
+        if slashpos > -1:
+            s = text[slashpos:]
+            if s in latex_symbols:
+                # Try to complete a full latex symbol to unicode
+                # \\alpha -> α
+                return s, [latex_symbols[s]]
+            else:
+                # If a user has partially typed a latex symbol, give them
+                # a full list of options \al -> [\aleph, \alpha]
+                matches = [k for k in latex_symbols if k.startswith(s)]
+                return s, matches
+        return u'', []
 
     def dispatch_custom_completer(self, text):
         #io.rprint("Custom! '%s' %s" % (text, self.custom_completers)) # dbg
@@ -1010,9 +1120,6 @@ class IPCompleter(Completer):
     def complete(self, text=None, line_buffer=None, cursor_pos=None):
         """Find completions for the given text and line context.
 
-        This is called successively with state == 0, 1, 2, ... until it
-        returns None.  The completion should begin with 'text'.
-
         Note that both the text and the line_buffer are optional, but at least
         one of them must be given.
 
@@ -1040,13 +1147,26 @@ class IPCompleter(Completer):
         matches : list
           A list of completion matches.
         """
-        #io.rprint('\nCOMP1 %r %r %r' % (text, line_buffer, cursor_pos))  # dbg
+        # io.rprint('\nCOMP1 %r %r %r' % (text, line_buffer, cursor_pos))  # dbg
 
         # if the cursor position isn't given, the only sane assumption we can
         # make is that it's at the end of the line (the common case)
         if cursor_pos is None:
             cursor_pos = len(line_buffer) if text is None else len(text)
 
+        if PY3:
+
+            base_text = text if not line_buffer else line_buffer[:cursor_pos]
+            latex_text, latex_matches = self.latex_matches(base_text)
+            if latex_matches:
+                 return latex_text, latex_matches
+            name_text = ''
+            name_matches = []
+            for meth in (self.unicode_name_matches, back_latex_name_matches, back_unicode_name_matches):
+                name_text, name_matches = meth(base_text)
+                if name_text:
+                    return name_text, name_matches
+        
         # if text is either None or an empty string, rely on the line buffer
         if not text:
             text = self.splitter.split_line(line_buffer, cursor_pos)
@@ -1057,7 +1177,7 @@ class IPCompleter(Completer):
 
         self.line_buffer = line_buffer
         self.text_until_cursor = self.line_buffer[:cursor_pos]
-        #io.rprint('COMP2 %r %r %r' % (text, line_buffer, cursor_pos))  # dbg
+        # io.rprint('COMP2 %r %r %r' % (text, line_buffer, cursor_pos))  # dbg
 
         # Start with a clean slate of completions
         self.matches[:] = []
@@ -1088,8 +1208,7 @@ class IPCompleter(Completer):
         # simply collapse the dict into a list for readline, but we'd have
         # richer completion semantics in other evironments.
 
-        # use penalize_magics_key to put magics after variables with same name
-        self.matches = sorted(set(self.matches), key=penalize_magics_key)
+        self.matches = sorted(set(self.matches), key=completions_sorting_key)
 
         #io.rprint('COMP TEXT, MATCHES: %r, %r' % (text, self.matches)) # dbg
         return text, self.matches
@@ -1155,3 +1274,4 @@ class IPCompleter(Completer):
             return self.matches[state]
         except IndexError:
             return None
+

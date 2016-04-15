@@ -1,25 +1,12 @@
-"""Implementation of basic magic functions.
-"""
-#-----------------------------------------------------------------------------
-#  Copyright (c) 2012 The IPython Development Team.
-#
-#  Distributed under the terms of the Modified BSD License.
-#
-#  The full license is in the file COPYING.txt, distributed with this software.
-#-----------------------------------------------------------------------------
+"""Implementation of basic magic functions."""
 
-#-----------------------------------------------------------------------------
-# Imports
-#-----------------------------------------------------------------------------
 from __future__ import print_function
+from __future__ import absolute_import
 
-# Stdlib
 import io
-import json
 import sys
 from pprint import pformat
 
-# Our own packages
 from IPython.core import magic_arguments, page
 from IPython.core.error import UsageError
 from IPython.core.magic import Magics, magics_class, line_magic, magic_escapes
@@ -28,11 +15,9 @@ from IPython.testing.skipdoctest import skip_doctest
 from IPython.utils.ipstruct import Struct
 from IPython.utils.path import unquote_filename
 from IPython.utils.py3compat import unicode_type
-from IPython.utils.warn import warn, error
+from warnings import warn
+from logging import error
 
-#-----------------------------------------------------------------------------
-# Magics class implementation
-#-----------------------------------------------------------------------------
 
 class MagicsDisplay(object):
     def __init__(self, magics_manager):
@@ -80,7 +65,7 @@ class MagicsDisplay(object):
         return magic_dict
         
     def _repr_json_(self):
-        return json.dumps(self._jsonable())
+        return self._jsonable()
 
 
 @magics_class
@@ -210,8 +195,6 @@ class BasicMagics(Magics):
         mode = ''
         try:
             mode = parameter_s.split()[0][1:]
-            if mode == 'rest':
-                rest_docs = []
         except IndexError:
             pass
 
@@ -263,7 +246,7 @@ NOTE: If you have 'automagic' enabled (via the command line option or with the
 magics; cell magics always require an explicit '%%' escape.  By default,
 IPython ships with automagic on, so you should only rarely need the % escape.
 
-Example: typing '%cd mydir' (without the quotes) changes you working directory
+Example: typing '%cd mydir' (without the quotes) changes your working directory
 to 'mydir', if it exists.
 
 For a list of the available magic functions, use %lsmagic. For a description
@@ -353,26 +336,25 @@ Currently the magic system has the following functions:""",
         # local shortcut
         shell = self.shell
 
-        import IPython.utils.rlineimpl as readline
 
-        if not shell.colors_force and \
-                not readline.have_readline and \
-                (sys.platform == "win32" or sys.platform == "cli"):
-            msg = """\
+
+        if not shell.colors_force:
+            if sys.platform in {'win32', 'cli'}:
+                import IPython.utils.rlineimpl as readline
+                if not readline.have_readline:
+                    msg = """\
 Proper color support under MS Windows requires the pyreadline library.
 You can find it at:
 http://ipython.org/pyreadline.html
-Gary's readline needs the ctypes module, from:
-http://starship.python.net/crew/theller/ctypes
-(Note that ctypes is already part of Python versions 2.5 and newer).
 
 Defaulting color scheme to 'NoColor'"""
-            new_scheme = 'NoColor'
-            warn(msg)
+                    new_scheme = 'NoColor'
+                    warn(msg)
 
-        # readline option is 0
-        if not shell.colors_force and not shell.has_readline:
-            new_scheme = 'NoColor'
+            elif not shell.has_readline:
+                # Coloured prompts get messed up without readline
+                # Will remove this check after switching to prompt_toolkit
+                new_scheme = 'NoColor'
 
         # Set prompt colors
         try:
@@ -473,7 +455,7 @@ Defaulting color scheme to 'NoColor'"""
         save_dstore('rc_active_types',disp_formatter.active_types)
         save_dstore('prompt_templates',(pm.in_template, pm.in2_template, pm.out_template))
 
-        if mode == False:
+        if not mode:
             # turn on
             pm.in_template = '>>> '
             pm.in2_template = '... '
@@ -525,6 +507,7 @@ Defaulting color scheme to 'NoColor'"""
 
             %gui wx      # enable wxPython event loop integration
             %gui qt4|qt  # enable PyQt4 event loop integration
+            %gui qt5     # enable PyQt5 event loop integration
             %gui gtk     # enable PyGTK event loop integration
             %gui gtk3    # enable Gtk3 event loop integration
             %gui tk      # enable Tk event loop integration
@@ -601,13 +584,6 @@ Defaulting color scheme to 'NoColor'"""
              'file extension will write the notebook as a Python script'
     )
     @magic_arguments.argument(
-        '-f', '--format',
-        help='Convert an existing IPython notebook to a new format. This option '
-             'specifies the new format and can have the values: json, py. '
-             'The target filename is chosen automatically based on the new '
-             'format. The filename argument gives the name of the source file.'
-    )
-    @magic_arguments.argument(
         'filename', type=unicode_type,
         help='Notebook name or filename'
     )
@@ -615,41 +591,24 @@ Defaulting color scheme to 'NoColor'"""
     def notebook(self, s):
         """Export and convert IPython notebooks.
 
-        This function can export the current IPython history to a notebook file
-        or can convert an existing notebook file into a different format. For
-        example, to export the history to "foo.ipynb" do "%notebook -e foo.ipynb".
-        To export the history to "foo.py" do "%notebook -e foo.py". To convert
-        "foo.ipynb" to "foo.json" do "%notebook -f json foo.ipynb". Possible
-        formats include (json/ipynb, py).
+        This function can export the current IPython history to a notebook file.
+        For example, to export the history to "foo.ipynb" do "%notebook -e foo.ipynb".
+        To export the history to "foo.py" do "%notebook -e foo.py".
         """
         args = magic_arguments.parse_argstring(self.notebook, s)
 
-        from IPython.nbformat import current
+        from nbformat import write, v4
         args.filename = unquote_filename(args.filename)
         if args.export:
-            fname, name, format = current.parse_filename(args.filename)
             cells = []
             hist = list(self.shell.history_manager.get_range())
-            for session, prompt_number, input in hist[:-1]:
-                cells.append(current.new_code_cell(prompt_number=prompt_number,
-                                                   input=input))
-            worksheet = current.new_worksheet(cells=cells)
-            nb = current.new_notebook(name=name,worksheets=[worksheet])
-            with io.open(fname, 'w', encoding='utf-8') as f:
-                current.write(nb, f, format);
-        elif args.format is not None:
-            old_fname, old_name, old_format = current.parse_filename(args.filename)
-            new_format = args.format
-            if new_format == u'xml':
-                raise ValueError('Notebooks cannot be written as xml.')
-            elif new_format == u'ipynb' or new_format == u'json':
-                new_fname = old_name + u'.ipynb'
-                new_format = u'json'
-            elif new_format == u'py':
-                new_fname = old_name + u'.py'
-            else:
-                raise ValueError('Invalid notebook format: %s' % new_format)
-            with io.open(old_fname, 'r', encoding='utf-8') as f:
-                nb = current.read(f, old_format)
-            with io.open(new_fname, 'w', encoding='utf-8') as f:
-                current.write(nb, f, new_format)
+            if(len(hist)<=1):
+                raise ValueError('History is empty, cannot export')
+            for session, execution_count, source in hist[:-1]:
+                cells.append(v4.new_code_cell(
+                    execution_count=execution_count,
+                    source=source
+                ))
+            nb = v4.new_notebook(cells=cells)
+            with io.open(args.filename, 'w', encoding='utf-8') as f:
+                write(nb, f, version=4)

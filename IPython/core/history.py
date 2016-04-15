@@ -27,15 +27,15 @@ except ImportError:
 import threading
 
 # Our own packages
-from IPython.config.configurable import Configurable
-from IPython.external.decorator import decorator
+from traitlets.config.configurable import LoggingConfigurable
+from decorator import decorator
 from IPython.utils.decorators import undoc
 from IPython.utils.path import locate_profile
 from IPython.utils import py3compat
-from IPython.utils.traitlets import (
+from traitlets import (
     Any, Bool, Dict, Instance, Integer, List, Unicode, TraitError,
 )
-from IPython.utils.warn import warn
+from warnings import warn
 
 #-----------------------------------------------------------------------------
 # Classes and functions
@@ -70,9 +70,14 @@ def needs_sqlite(f, self, *a, **kw):
 
 if sqlite3 is not None:
     DatabaseError = sqlite3.DatabaseError
+    OperationalError = sqlite3.OperationalError
 else:
     @undoc
     class DatabaseError(Exception):
+        "Dummy exception when sqlite could not be imported. Should never occur."
+    
+    @undoc
+    class OperationalError(Exception):
         "Dummy exception when sqlite could not be imported. Should never occur."
 
 @decorator
@@ -83,7 +88,7 @@ def catch_corrupt_db(f, self, *a, **kw):
     """
     try:
         return f(self, *a, **kw)
-    except DatabaseError:
+    except (DatabaseError, OperationalError):
         if os.path.isfile(self.hist_file):
             # Try to move the file out of the way
             base,ext = os.path.splitext(self.hist_file)
@@ -98,9 +103,24 @@ def catch_corrupt_db(f, self, *a, **kw):
             # The hist_file is probably :memory: or something else.
             raise
         
+class HistoryAccessorBase(LoggingConfigurable):
+    """An abstract class for History Accessors """
+
+    def get_tail(self, n=10, raw=True, output=False, include_latest=False):
+        raise NotImplementedError
+
+    def search(self, pattern="*", raw=True, search_raw=True,
+               output=False, n=None, unique=False):
+        raise NotImplementedError
+
+    def get_range(self, session, start=1, stop=None, raw=True,output=False):
+        raise NotImplementedError
+
+    def get_range_by_str(self, rangestr, raw=True, output=False):
+        raise NotImplementedError
 
 
-class HistoryAccessor(Configurable):
+class HistoryAccessor(HistoryAccessorBase):
     """Access the history database without adding to it.
     
     This is intended for use by standalone history tools. IPython shells use
@@ -162,7 +182,7 @@ class HistoryAccessor(Configurable):
         hist_file : str
           Path to an SQLite history database stored by IPython. If specified,
           hist_file overrides profile.
-        config : :class:`~IPython.config.loader.Config`
+        config : :class:`~traitlets.config.loader.Config`
           Config object. hist_file can also be set through this.
         """
         # We need a pointer back to the shell for various tasks.
@@ -428,7 +448,8 @@ class HistoryManager(HistoryAccessor):
     # Public interface
 
     # An instance of the IPython shell we are attached to
-    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC')
+    shell = Instance('IPython.core.interactiveshell.InteractiveShellABC',
+                     allow_none=True)
     # Lists to hold processed and raw history. These start with a blank entry
     # so that we can index them starting from 1
     input_hist_parsed = List([""])
@@ -462,11 +483,12 @@ class HistoryManager(HistoryAccessor):
     db_output_cache = List()
     
     # History saving in separate thread
-    save_thread = Instance('IPython.core.history.HistorySavingThread')
+    save_thread = Instance('IPython.core.history.HistorySavingThread',
+                           allow_none=True)
     try:               # Event is a function returning an instance of _Event...
-        save_flag = Instance(threading._Event)
+        save_flag = Instance(threading._Event, allow_none=True)
     except AttributeError:         # ...until Python 3.3, when it's a class.
-        save_flag = Instance(threading.Event)
+        save_flag = Instance(threading.Event, allow_none=True)
     
     # Private interface
     # Variables used to store the three last inputs from the user.  On each new
@@ -491,11 +513,17 @@ class HistoryManager(HistoryAccessor):
         self.save_flag = threading.Event()
         self.db_input_cache_lock = threading.Lock()
         self.db_output_cache_lock = threading.Lock()
+        
+        try:
+            self.new_session()
+        except OperationalError:
+            self.log.error("Failed to create history session in %s. History will not be saved.",
+                self.hist_file, exc_info=True)
+            self.hist_file = ':memory:'
+        
         if self.enabled and self.hist_file != ':memory:':
             self.save_thread = HistorySavingThread(self)
             self.save_thread.start()
-
-        self.new_session()
 
     def _get_hist_file_name(self, profile=None):
         """Get default history file name based on the Shell's profile.
@@ -544,7 +572,7 @@ class HistoryManager(HistoryAccessor):
             self.input_hist_parsed[:] = [""]
             self.input_hist_raw[:] = [""]
             self.new_session()
-    
+
     # ------------------------------
     # Methods for retrieving history
     # ------------------------------
@@ -851,5 +879,3 @@ def _format_lineno(session, line):
     if session == 0:
         return str(line)
     return "%s#%s" % (session, line)
-
-

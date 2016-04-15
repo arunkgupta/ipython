@@ -1,6 +1,7 @@
 """Implementation of configuration-related magic functions.
 """
 from __future__ import print_function
+from __future__ import absolute_import
 #-----------------------------------------------------------------------------
 #  Copyright (c) 2012 The IPython Development Team.
 #
@@ -19,7 +20,7 @@ import re
 # Our own packages
 from IPython.core.error import UsageError
 from IPython.core.magic import Magics, magics_class, line_magic
-from IPython.utils.warn import error
+from logging import error
 
 #-----------------------------------------------------------------------------
 # Magic implementation classes
@@ -106,7 +107,7 @@ class ConfigMagics(Magics):
             In [5]: %config IPCompleter.greedy = feeling_greedy
 
         """
-        from IPython.config.loader import Config
+        from traitlets.config.loader import Config
         # some IPython objects are Configurable, but do not yet have
         # any configurable traits.  Exclude them from the effects of
         # this magic, as their presence is just noise:
